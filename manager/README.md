@@ -17,7 +17,7 @@ Tauri 2 / Rust + TypeScript tray control panel. Windows 10 / 11. This is a nativ
 
 ## v0.1.4 UI
 
-- The Overview card has a **选择配置文件 (Select configuration)** button. It opens a popup listing every previously registered config plus automatically discovered valid deployment JSON files. **注册配置文件** opens a native file chooser. Switching the active config does not discard other registrations.
+- The Overview card has a **选择配置文件 (Select configuration)** button. It opens a popup showing only explicitly registered configuration JSON files and the active configuration. Other JSONs on disk do not reappear automatically. **注册配置文件** opens a native file chooser. Switching the active config does not discard other registrations.
 - The second tab is **API**. Port, read-only visible API Key with only **Copy / Rotate** actions, and LAN access each fit on one compact row. Tunnel shows only domain, encrypted token entry, and **Install / Test / Restart** buttons. Port or access-mode changes require the service to be stopped.
 - Each JSON is listed **by filename** with the associated model name, maximum context tokens, and quantization. The **查看 (View)** action opens a read-only details dialog showing the model GGUF path, engine, tokenizer, KV precision, vision projector, optional draft model, VRAM reserve, memory cache budget, and idle unload timer (when set).
 - The Overview card shows the **active config filename**, model name, and configured context window even when the server is stopped.

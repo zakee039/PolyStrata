@@ -842,15 +842,12 @@ fn save_settings(state: State<'_, AppState>, incoming: Preferences) -> Result<Pr
         return Err("请先保存 Cloudflare Tunnel Token，再启用 Tunnel".into());
     }
     let mut merged = incoming;
-    // Keep the history of registered JSON files even when changing the active
-    // configuration. Never implicitly erase previously imported configurations.
-    let mut known = inner.prefs.registered_configs.clone();
-    known.extend(merged.registered_configs.iter().cloned());
-    known.push(inner.prefs.config_path.clone());
-    known.push(merged.config_path.clone());
-    known.sort_by_key(|x| x.to_lowercase());
-    known.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-    merged.registered_configs = known;
+    // Keep only explicitly registered configurations. Merely selecting a config
+    // must not silently re-register a previously removed config.
+    merged.registered_configs.sort_by_key(|x| x.to_lowercase());
+    merged
+        .registered_configs
+        .dedup_by(|a, b| a.eq_ignore_ascii_case(b));
     if merged.autostart != inner.prefs.autostart {
         set_autostart(merged.autostart)?;
     }
@@ -955,46 +952,11 @@ fn register_config(state: State<'_, AppState>, path: String) -> Result<ModelConf
 fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelConfig>, String> {
     let prefs = state.inner.lock().map_err(|e| e.to_string())?.prefs.clone();
     let selected = prefs.config_path.clone();
-    let root = PathBuf::from(&prefs.project_path);
-    let dirs = [
-        root.clone(),
-        root.parent().unwrap_or(&root).join("benchmark/configs"),
-        PathBuf::from(&selected)
-            .parent()
-            .unwrap_or(&root)
-            .to_path_buf(),
-    ];
+    // The chooser lists registered configurations only. Scanning the project
+    // directory used to bring back unregistered benchmark/source JSON files.
     let mut seen = std::collections::HashSet::new();
     let mut paths = vec![PathBuf::from(&selected)];
     paths.extend(prefs.registered_configs.into_iter().map(PathBuf::from));
-    // Our current deployment used reserve1024-128-v1.json before switching
-    // to the source tree's strata-*.json. Preserve and rediscover it.
-    paths.push(
-        root.parent()
-            .unwrap_or(&root)
-            .join("benchmark/configs/reserve1024-128-v1.json"),
-    );
-    for dir in dirs {
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                let prefix = p
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .starts_with("strata-");
-                let is_benchmark_configs = dir.ends_with("benchmark/configs");
-                // Filter using the actual model deployment schema (exe + model)
-                // below, rather than dropping custom filenames after switching.
-                if p.extension()
-                    .is_some_and(|x| x.eq_ignore_ascii_case("json"))
-                    && (prefix || is_benchmark_configs)
-                {
-                    paths.push(p);
-                }
-            }
-        }
-    }
     let mut models = Vec::new();
     for path in paths {
         if !path.is_file() || !seen.insert(path.to_string_lossy().to_ascii_lowercase()) {

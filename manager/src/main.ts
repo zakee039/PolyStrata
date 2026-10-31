@@ -24,7 +24,7 @@ function badge(){const [s,c]=phases[status?.phase||"stopped"]||["异常","bad"];
 function render(){
  root.innerHTML=`<header class="head"><div class="brand"><div class="brand-symbol"><b>P</b></div><div><h1>PolyStrata</h1><small>LOCAL MODEL MANAGER</small></div></div><span id="phase">${badge()}</span></header>
  <nav class="tabs">${Object.keys(names).map(t=>`<button class="tab ${tab===t?"selected":""}" data-tab="${t}">${names[t]}</button>`).join("")}</nav>
- <main id="content"></main><footer><span id="notice">${esc(toast||"本机服务管理 · Windows")}</span><span>v0.1.4</span></footer>`;
+ <main id="content"></main><footer><span id="notice">${esc(toast||"本机服务管理 · Windows")}</span><span>v0.1.5</span></footer>`;
  document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(b=>b.onclick=()=>{tab=b.dataset.tab!;render();});
  content();
 }
@@ -65,7 +65,7 @@ function overview(){
  <div class="subactions"><button id="btn-load" ${!owned||phase!=="unloaded"?"disabled":""}>立即加载模型</button><button id="btn-log">查看运行日志</button></div></section>`;
 }
 function modelPage(){
- return `<div class="config-picker-intro"><p>选择已注册的部署配置。模型、上下文和资源参数均从 JSON 自动读取。</p></div>
+ return `<div class="config-picker-intro"><p>只显示已注册的配置文件。</p></div>
  <div class="model-list">${models.map(m=>{
   const selected=m.path.toLowerCase()===prefs?.config_path.toLowerCase();
   return `<div class="model-item ${selected?"is-selected":""}">
