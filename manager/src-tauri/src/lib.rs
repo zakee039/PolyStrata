@@ -18,6 +18,7 @@ use tauri::{
     Emitter, Manager, Position, State, WindowEvent,
 };
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+mod security;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -30,6 +31,11 @@ struct Preferences {
     autostart: bool,
     auto_load_model: bool,
     watchdog: bool,
+    lan_access: bool,
+    cf_enabled: bool,
+    cf_binary: String,
+    cf_hostname: String,
+    registered_configs: Vec<String>,
     config_path: String,
     project_path: String,
     port: u16,
@@ -47,6 +53,17 @@ impl Default for Preferences {
             autostart: false,
             auto_load_model: false,
             watchdog: true,
+            lan_access: false,
+            cf_enabled: false,
+            cf_binary: if Path::new("C:\\Program Files (x86)\\cloudflared\\cloudflared.exe")
+                .is_file()
+            {
+                "C:\\Program Files (x86)\\cloudflared\\cloudflared.exe".into()
+            } else {
+                "cloudflared.exe".into()
+            },
+            cf_hostname: String::new(),
+            registered_configs: Vec::new(),
             config_path: config.to_string_lossy().to_string(),
             project_path: root.to_string_lossy().to_string(),
             port: 18081,
@@ -57,6 +74,8 @@ impl Default for Preferences {
 struct Inner {
     prefs: Preferences,
     child: Option<Child>,
+    cf_child: Option<Child>,
+    cf_error: String,
     desired: bool,
     stopping: bool,
     error: String,
@@ -139,7 +158,9 @@ fn port_open(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(240)).is_ok()
 }
 fn api_get(port: u16, path: &str) -> Result<Value, String> {
+    let key = security::ensure_api_key()?;
     ureq::get(&format!("http://127.0.0.1:{port}{path}"))
+        .set("Authorization", &format!("Bearer {key}"))
         .timeout(Duration::from_millis(950))
         .call()
         .map_err(|e| e.to_string())?
@@ -147,7 +168,9 @@ fn api_get(port: u16, path: &str) -> Result<Value, String> {
         .map_err(|e| e.to_string())
 }
 fn api_post(port: u16, path: &str, timeout: u64) -> Result<Value, String> {
+    let key = security::ensure_api_key()?;
     ureq::post(&format!("http://127.0.0.1:{port}{path}"))
+        .set("Authorization", &format!("Bearer {key}"))
         .set("Origin", &format!("http://127.0.0.1:{port}"))
         .set("Content-Type", "application/json")
         .timeout(Duration::from_secs(timeout))
@@ -193,6 +216,10 @@ fn spawn_backend(p: &Preferences) -> Result<Child, String> {
     if !Path::new(&p.config_path).is_file() {
         return Err(format!("部署配置不存在：{}", p.config_path));
     }
+    let api_key = security::ensure_api_key()?;
+    if p.cf_enabled && security::read("cf-tunnel-token")?.is_none() {
+        return Err("启用 Cloudflare Tunnel 前，请先在设置中保存 Tunnel Token".into());
+    }
     fs::create_dir_all(state_dir()).map_err(|e| e.to_string())?;
     let mut logfile = OpenOptions::new()
         .append(true)
@@ -215,7 +242,8 @@ fn spawn_backend(p: &Preferences) -> Result<Child, String> {
         .arg("--port")
         .arg(p.port.to_string())
         .arg("--host")
-        .arg("127.0.0.1")
+        .arg(if p.lan_access { "0.0.0.0" } else { "127.0.0.1" })
+        .env("STRATA_API_KEY", api_key)
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::from(logfile))
@@ -226,6 +254,40 @@ fn spawn_backend(p: &Preferences) -> Result<Child, String> {
     }
     cmd.spawn().map_err(|e| format!("服务启动失败：{e}"))
 }
+fn spawn_tunnel(p: &Preferences) -> Result<Child, String> {
+    let token = security::read("cf-tunnel-token")?
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "Cloudflare Tunnel Token 未配置".to_string())?;
+    let binary = if p.cf_binary.trim().is_empty() {
+        "cloudflared.exe"
+    } else {
+        p.cf_binary.trim()
+    };
+    fs::create_dir_all(state_dir()).map_err(|e| e.to_string())?;
+    let file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(state_dir().join("cloudflared.log"))
+        .map_err(|e| e.to_string())?;
+    let err = file.try_clone().map_err(|e| e.to_string())?;
+    let mut cmd = Command::new(binary);
+    cmd.args(["tunnel", "--no-autoupdate", "run"])
+        .env("TUNNEL_TOKEN", token)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::from(err))
+        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+    cmd.spawn()
+        .map_err(|e| format!("无法启动 cloudflared，请检查安装路径：{e}"))
+}
+
+fn stop_tunnel(child: &mut Option<Child>) {
+    if let Some(mut p) = child.take() {
+        let _ = p.kill();
+        let _ = p.wait();
+    }
+}
+
 fn start_backend(state: &AppState) -> Result<(), String> {
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     if inner.stopping {
@@ -247,6 +309,19 @@ fn start_backend(state: &AppState) -> Result<(), String> {
     inner.child = Some(child);
     inner.desired = true;
     inner.error.clear();
+    if inner.prefs.cf_enabled {
+        stop_tunnel(&mut inner.cf_child);
+        let prefs = inner.prefs.clone();
+        match spawn_tunnel(&prefs) {
+            Ok(tunnel) => {
+                inner.cf_child = Some(tunnel);
+                inner.cf_error.clear();
+            }
+            Err(e) => {
+                inner.cf_error = e;
+            }
+        }
+    }
     Ok(())
 }
 fn stop_backend(state: &AppState) -> Result<(), String> {
@@ -256,6 +331,7 @@ fn stop_backend(state: &AppState) -> Result<(), String> {
             return Err("正在停止服务".into());
         }
         inner.desired = false;
+        stop_tunnel(&mut inner.cf_child);
         let port = inner.prefs.port;
         let Some(child) = inner.child.take() else {
             return Ok(());
@@ -336,9 +412,10 @@ async fn load_model(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 async fn get_status(state: State<'_, AppState>) -> Result<Value, String> {
-    let (prefs, owned, stopping, error, desired, restarts) = {
+    let (prefs, owned, stopping, error, desired, restarts, cf_running, cf_error) = {
         let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
         let owned = guard.child.as_mut().is_some_and(child_running);
+        let cf_running = guard.cf_child.as_mut().is_some_and(child_running);
         (
             guard.prefs.clone(),
             owned,
@@ -346,6 +423,8 @@ async fn get_status(state: State<'_, AppState>) -> Result<Value, String> {
             guard.error.clone(),
             guard.desired,
             guard.restarts,
+            cf_running,
+            guard.cf_error.clone(),
         )
     };
     let (metrics, host_gpu) = tauri::async_runtime::spawn_blocking(move || {
@@ -378,8 +457,65 @@ async fn get_status(state: State<'_, AppState>) -> Result<Value, String> {
     Ok(
         json!({"phase":phase, "managed":owned, "desired":desired, "error":error,
         "restarts":restarts,"settings":state.inner.lock().map_err(|e| e.to_string())?.prefs.clone(),
-        "metrics":metrics,"host_gpu":host_gpu}),
+        "metrics":metrics,"host_gpu":host_gpu,"cf_running":cf_running,
+        "cf_error":cf_error, "cf_token_present":security::read("cf-tunnel-token")?.is_some(),
+        "api_key_present":security::read("api-key")?.is_some()}),
     )
+}
+
+#[tauri::command]
+fn reveal_api_key() -> Result<String, String> {
+    security::ensure_api_key()
+}
+
+#[tauri::command]
+fn replace_api_key(state: State<'_, AppState>, new_key: String) -> Result<(), String> {
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    if inner.child.as_mut().is_some_and(child_running) {
+        return Err("更换 API Key 前请先停止服务，避免在运行中断开现有客户端".into());
+    }
+    let key = new_key.trim();
+    if key.len() < 24
+        || key.len() > 256
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    {
+        return Err("API Key 应为 24～256 位英数字、短横线、下划线或点号".into());
+    }
+    security::store("api-key", key)
+}
+
+#[tauri::command]
+fn generate_api_key(state: State<'_, AppState>) -> Result<String, String> {
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    if inner.child.as_mut().is_some_and(child_running) {
+        return Err("更换 API Key 前请先停止服务".into());
+    }
+    let key = security::random_api_key()?;
+    security::store("api-key", &key)?;
+    Ok(key)
+}
+
+#[tauri::command]
+fn save_tunnel_token(state: State<'_, AppState>, token: String) -> Result<(), String> {
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    if inner.child.as_mut().is_some_and(child_running) {
+        return Err("更新 Tunnel Token 前请先停止服务".into());
+    }
+    let token = token.trim();
+    if token.len() < 50
+        || token.len() > 4096
+        || !token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_=.".contains(c))
+    {
+        return Err(
+            "Tunnel Token 格式不正确：请从 Cloudflare Tunnel 的“Add a replica”复制 eyJ... Token"
+                .into(),
+        );
+    }
+    security::store("cf-tunnel-token", token)
 }
 
 #[tauri::command]
@@ -409,16 +545,32 @@ fn save_settings(state: State<'_, AppState>, incoming: Preferences) -> Result<Pr
     if is_running
         && (incoming.config_path != inner.prefs.config_path
             || incoming.project_path != inner.prefs.project_path
-            || incoming.port != inner.prefs.port)
+            || incoming.port != inner.prefs.port
+            || incoming.lan_access != inner.prefs.lan_access
+            || incoming.cf_enabled != inner.prefs.cf_enabled
+            || incoming.cf_binary != inner.prefs.cf_binary)
     {
-        return Err("停止服务后才能切换启动配置或端口".into());
+        return Err("请先停止服务，再修改局域网访问、Tunnel 或部署配置".into());
     }
-    if incoming.autostart != inner.prefs.autostart {
-        set_autostart(incoming.autostart)?;
+    if incoming.cf_enabled && security::read("cf-tunnel-token")?.is_none() {
+        return Err("请先保存 Cloudflare Tunnel Token，再启用 Tunnel".into());
     }
-    save_prefs(&incoming)?;
-    inner.prefs = incoming.clone();
-    Ok(incoming)
+    let mut merged = incoming;
+    // Keep the history of registered JSON files even when changing the active
+    // configuration. Never implicitly erase previously imported configurations.
+    let mut known = inner.prefs.registered_configs.clone();
+    known.extend(merged.registered_configs.iter().cloned());
+    known.push(inner.prefs.config_path.clone());
+    known.push(merged.config_path.clone());
+    known.sort_by_key(|x| x.to_lowercase());
+    known.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    merged.registered_configs = known;
+    if merged.autostart != inner.prefs.autostart {
+        set_autostart(merged.autostart)?;
+    }
+    save_prefs(&merged)?;
+    inner.prefs = merged.clone();
+    Ok(merged)
 }
 
 #[derive(Serialize)]
@@ -478,22 +630,46 @@ fn model_config_from_json(path: &Path, info: &Value) -> Option<ModelConfig> {
 }
 
 #[tauri::command]
-fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelConfig>, String> {
-    let selected = state
-        .inner
-        .lock()
-        .map_err(|e| e.to_string())?
+fn register_config(state: State<'_, AppState>, path: String) -> Result<ModelConfig, String> {
+    let file = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !file
+        .extension()
+        .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+    {
+        return Err("请选择 JSON 部署配置文件".into());
+    }
+    let data = fs::read(&file).map_err(|e| e.to_string())?;
+    if data.len() > 2_000_000 {
+        return Err("配置文件体积异常，请检查是否选错".into());
+    }
+    let value: Value = serde_json::from_slice(&data).map_err(|e| format!("JSON 无效：{e}"))?;
+    let config = model_config_from_json(&file, &value)
+        .ok_or_else(|| "不是 PolyStrata 部署配置：缺少 exe 字段".to_string())?;
+    if config.model.is_empty() {
+        return Err("配置缺少 --model 参数，无法注册".into());
+    }
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    if !inner
         .prefs
-        .config_path
-        .clone();
-    let root = PathBuf::from(
-        &state
-            .inner
-            .lock()
-            .map_err(|e| e.to_string())?
-            .prefs
-            .project_path,
-    );
+        .registered_configs
+        .iter()
+        .any(|x| x.eq_ignore_ascii_case(&config.path))
+    {
+        let mut prefs = inner.prefs.clone();
+        prefs.registered_configs.push(config.path.clone());
+        save_prefs(&prefs)?;
+        inner.prefs = prefs;
+    }
+    Ok(config)
+}
+
+#[tauri::command]
+fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelConfig>, String> {
+    let prefs = state.inner.lock().map_err(|e| e.to_string())?.prefs.clone();
+    let selected = prefs.config_path.clone();
+    let root = PathBuf::from(&prefs.project_path);
     let dirs = [
         root.clone(),
         root.parent().unwrap_or(&root).join("benchmark/configs"),
@@ -504,6 +680,14 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelConfig>, String> {
     ];
     let mut seen = std::collections::HashSet::new();
     let mut paths = vec![PathBuf::from(&selected)];
+    paths.extend(prefs.registered_configs.into_iter().map(PathBuf::from));
+    // Our current deployment used reserve1024-128-v1.json before switching
+    // to the source tree's strata-*.json. Preserve and rediscover it.
+    paths.push(
+        root.parent()
+            .unwrap_or(&root)
+            .join("benchmark/configs/reserve1024-128-v1.json"),
+    );
     for dir in dirs {
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
@@ -513,9 +697,13 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelConfig>, String> {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .starts_with("strata-");
-                // The active deployment may have a custom filename and is already
-                // inserted above. Do not flood the registry with benchmark JSONs.
-                if p.extension().is_some_and(|x| x == "json") && prefix {
+                let is_benchmark_configs = dir.ends_with("benchmark/configs");
+                // Filter using the actual model deployment schema (exe + model)
+                // below, rather than dropping custom filenames after switching.
+                if p.extension()
+                    .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+                    && (prefix || is_benchmark_configs)
+                {
                     paths.push(p);
                 }
             }
@@ -646,10 +834,14 @@ pub fn self_test() -> i32 {
     // --self-test-full additionally validates real GPU model preloading.
     let full = std::env::args().any(|arg| arg == "--self-test-full");
     prefs.auto_load_model = full;
+    prefs.lan_access = false;
+    prefs.cf_enabled = false;
     let state = AppState {
         inner: Mutex::new(Inner {
             prefs: prefs.clone(),
             child: None,
+            cf_child: None,
+            cf_error: String::new(),
             desired: false,
             stopping: false,
             error: String::new(),
@@ -709,6 +901,7 @@ pub fn self_test() -> i32 {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show(app, None);
         }))
@@ -716,6 +909,8 @@ pub fn run() {
             inner: Mutex::new(Inner {
                 prefs: initial_prefs(),
                 child: None,
+                cf_child: None,
+                cf_error: String::new(),
                 desired: false,
                 stopping: false,
                 error: String::new(),
@@ -730,7 +925,12 @@ pub fn run() {
             get_status,
             get_settings,
             save_settings,
+            reveal_api_key,
+            replace_api_key,
+            generate_api_key,
+            save_tunnel_token,
             list_models,
+            register_config,
             get_log,
             open_chat
         ])
