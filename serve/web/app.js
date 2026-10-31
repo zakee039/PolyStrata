@@ -142,6 +142,7 @@ $("model-select").onchange = async () => {
   await loadModels();
   if (message) { toast("error", "The model was not switched", message, 10000); return; }
   messages = [];
+  if (sessionV1) { sessionId = makeSessionId(); store.set("session-id", sessionId); }
   saveChat();
   renderChat();
   toast("success", `${name} is loaded`, "A new chat was started.");
@@ -608,13 +609,92 @@ function samplingUntouched(s) {
 }
 let settings = {...DEFAULTS, ...store.get("sampling", {})};
 if (samplingUntouched(settings)) settings.temperature = DEFAULTS.temperature;
-let messages = store.get("chat", []);
+let messages = []; // V1 starts with server-owned records; old browser-only chats are intentionally discarded.
+// V1: browser storage is a fallback; the server owns durable conversation records.
+const makeSessionId = () => crypto.randomUUID().replace(/-/g, "");
+let sessionId = store.get("session-id", ""); // purely a pointer to a server-side conversation
+let sessionV1 = false;
+let sessionSaveChain = Promise.resolve();
+function safeChat() {
+  return messages.map((m) => ({...m,
+    images: (m.images || []).map((i) => ({name: i.name})),
+    files: (m.files || []).map((f) => ({name: f.name}))}));
+}
+async function refreshSessionPicker() {
+  if (!sessionV1) return [];
+  const r = await fetch("v1/strata/sessions", {headers: headers()});
+  if (!r.ok) throw new Error("Unable to retrieve server chat history");
+  const list = (await r.json()).sessions || [];
+  const picker = $("session-picker");
+  picker.replaceChildren();
+  const current = sessionId;
+  if (current && !list.some((s) => s.id === current))
+    list.unshift({id: current, title: "New chat"});
+  for (const s of list) {
+    const option = new Option(s.title || "New chat", s.id);
+    picker.add(option);
+  }
+  if (current) picker.value = current;
+  picker.hidden = false;
+  return list;
+}
+async function loadServerChat(id) {
+  const r = await fetch("v1/strata/sessions/" + encodeURIComponent(id), {headers: headers()});
+  if (!r.ok) throw new Error("Chat was not found");
+  const saved = await r.json();
+  messages = saved.web_messages?.length ? saved.web_messages : (saved.api_messages || [])
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .map((m) => ({role: m.role, text: typeof m.content === "string" ? m.content :
+      (Array.isArray(m.content) ? m.content.filter((p) => p.type === "text").map((p) => p.text).join("\n") : ""),
+      time: Date.now()}));
+  sessionId = id;
+  store.set("session-id", id);
+  store.set("chat", safeChat()); // do not put base64 images in browser storage
+  renderChat();
+  await refreshSessionPicker();
+}
+async function enableServerSessions() {
+  try {
+    const r = await fetch("v1/strata/sessions", {headers: headers()});
+    if (!r.ok) return;
+    sessionV1 = true;
+    const list = (await r.json()).sessions || [];
+    // Old browser chats deliberately aren't migrated; only server records are authoritative.
+    if (sessionId && list.some((s) => s.id === sessionId)) {
+      await loadServerChat(sessionId);
+    } else if (!messages.length && list.length) {
+      await loadServerChat(list[0].id);
+    } else if (!sessionId) {
+      sessionId = makeSessionId();
+      store.set("session-id", sessionId);
+    }
+    await refreshSessionPicker();
+  } catch (e) {
+    console.warn("Server chat history unavailable; keeping browser fallback", e);
+  }
+}
+$("session-picker").onchange = async () => {
+  if (busy) { toast("warn", "Finish the response before switching chats"); $("session-picker").value = sessionId; return; }
+  const next = $("session-picker").value;
+  if (!next || next === sessionId) return;
+  try { await sessionSaveChain; await loadServerChat(next); }
+  catch (e) { toast("error", "Could not open chat", String(e)); $("session-picker").value = sessionId; }
+};
 let attachments = [];                 // {name, url}
 let busy = null;                      // {controller, msg, cutoff?}
 
 function saveChat() {
-  store.set("chat", messages.map((m) => ({...m, images: (m.images || []).map((i) => ({name: i.name})),
-                                           files: (m.files || []).map((f) => ({name: f.name}))})));
+  const snapshot = messages.map((m) => ({...m, images: (m.images || []).map((i) => ({...i})),
+    files: (m.files || []).map((f) => ({...f}))}));
+  store.set("chat", safeChat()); // fallback remains small; full images and files are stored by the server
+  if (sessionV1 && sessionId && snapshot.length) {
+    const id = sessionId;
+    sessionSaveChain = sessionSaveChain.then(async () => {
+      const r = await fetch("v1/strata/sessions", {
+        method: "POST", headers: headers(true), body: JSON.stringify({id, web_messages: snapshot})});
+      if (!r.ok) throw new Error("HTTP " + r.status);
+    }).catch((e) => { console.warn("Server chat save failed; browser backup kept", e); });
+  }
 }
 function timeStr(t) { return new Date(t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}); }
 
@@ -655,6 +735,7 @@ async function streamInto(m, el, signal) {
   if (settings.max) body.max_tokens = +settings.max;
   if (projectionLoaded()) body.experimental_speed_projection = !!settings.esp;
   if (settings.mcp !== false && mcpInfo.tools > 0) body.strata_mcp = true;
+  if (sessionV1 && sessionId) body.strata_session_id = sessionId;
 
   let firstAt = null, thinkStart = null, usage = null, frame = 0;
   const paint = () => { frame = 0; updateAssistant(el, m, true); scrollDown(); };
@@ -1017,6 +1098,7 @@ async function send() {
   autosize();
   const m = {role: "assistant", text: "", reasoning: "", time: Date.now()};
   messages.push(m);
+  saveChat();                              // persist the user's question even if generation is interrupted
   renderChat();
   const el = $("chat").lastElementChild;
   const controller = new AbortController();
@@ -1033,6 +1115,7 @@ async function send() {
   setBusy(false);
   updateAssistant(el, m, false);
   saveChat();
+  if (sessionV1) sessionSaveChain.then(refreshSessionPicker).catch(console.warn);
   scrollDown();
 }
 
@@ -1044,8 +1127,19 @@ $("input").addEventListener("keydown", (e) => {
 function autosize() { const t = $("input"); t.style.height = "auto"; t.style.height = `${Math.min(t.scrollHeight, innerHeight * 0.4)}px`; }
 $("input").addEventListener("input", autosize);
 
-$("new-btn").onclick = () => {
+$("new-btn").onclick = async () => {
   if (busy) { toast("warn", "Still writing", "Stop the answer first."); return; }
+  if (sessionV1) {
+    await sessionSaveChain;
+    sessionId = makeSessionId();
+    store.set("session-id", sessionId);
+    messages = [];
+    store.set("chat", []);
+    renderChat();
+    await refreshSessionPicker();
+    toast("info", "New chat", "Previous conversations remain in the history.");
+    return;
+  }
   if (!messages.length) return;
   const backup = messages;
   messages = [];
@@ -1248,7 +1342,7 @@ renderChat();
 const startQuestion = new URLSearchParams(location.search).get("q");   // /?q=... starts a chat (a shortcut)
 if (startQuestion) history.replaceState(null, "", location.pathname + location.hash);
 loadModels();
-loadHealth().then(loadMcp).then(() => { if (startQuestion) { $("input").value = startQuestion; send(); } });
+loadHealth().then(enableServerSessions).then(loadMcp).then(() => { if (startQuestion) { $("input").value = startQuestion; send(); } });
 showTab(location.hash.slice(1) || "chat");
 poll();
 

@@ -59,6 +59,10 @@ build-vision-cuda12.bat
 /build-release*/
 /dist/
 *.done
+# local durable conversations; never commit
+/chat-history/
+/kv-cache/
+/cmake-build-kv/
 /third_party/*.zip
 
 # IDEs
@@ -71,3 +75,8 @@ build-vision-cuda12.bat
 
 # local Windows HIP packaging output
 dist-hip/
+
+# User-local GGUF/draft models and tokenizers; keep generated data outside the fork.
+/data/models/
+/data/packs/
+/test-blue.png

@@ -6,6 +6,7 @@
 // The protocol is the one `strata --serve` speaks (src/program/generate.cpp): GEN, GENI for a prompt with pictures,
 // STOP and QUIT in, and RESUME, PP, T, DONE and ERR out.
 #include "conversations.hpp"
+#include <filesystem>
 #include "engine.hpp"
 #include "guesses.hpp"
 #include "strata/core/conversation_memory.hpp"
@@ -41,6 +42,8 @@
 #include <windows.h>
 #undef far   // a word of this file's
 #endif
+
+#include "session_disk.hpp"
 
 #ifndef STRATA_VERSION
 #define STRATA_VERSION "dev"
@@ -599,12 +602,12 @@ struct Slot {
     Clock::time_point t0;
 };
 
-int serve(Session& ss) {
+int serve(Session& ss, uint64_t signature) {
     Engine& engine = ss.engine;
     std::vector<Slot> slots((size_t) engine.sequences() - 1);
     std::printf("INFO context=%d expert_slots=%d expert_cache_mib=%lld pool_workers=%d conversation_cache_mib=%lld "
                 "conversation_cache_slots=%d conversation_cache_min_free_mib=%lld vram_free_mib=%lld vram_elastic=1 "
-                "batch_slots=%d engine=" STRATA_VERSION "\n",
+                "batch_slots=%d session_files=1 engine=" STRATA_VERSION "\n",
                 engine.max_context(), engine.cached_experts(), (long long) (engine.cached_gib() * 1024.0),
                 engine.threads(), (long long) ss.flags.o.park_mib, ss.flags.o.park_slots, ss.flags.min_free_mib,
                 (long long) engine.vram_free_mib(), (int) slots.size());
@@ -793,6 +796,34 @@ int serve(Session& ss) {
                 std::printf("ERR VRAM: %s\n", e.what());
             }
             std::fflush(stdout);
+            continue;
+        }
+        // Session files are opt-in. The server's FIFO prevents a concurrent GEN or unload.
+        if (line.rfind("SAVE ", 0) == 0 || line.rfind("RESTORE ", 0) == 0) {
+            const bool saving = line.rfind("SAVE ", 0) == 0;
+            const std::string path = line.substr(saving ? 5 : 8);
+            if (writing() || !slots.empty()) {
+                std::printf("SERR invalid 0 session files require a single inactive batch slot\n");
+                std::fflush(stdout);
+                continue;
+            }
+            try {
+                engine.bind(0);
+                strata::poly::disk::SessionFile<Engine> io{engine, ss.kept, signature};
+                if (saving) io.save(path);
+                else io.restore(path);
+            } catch (const strata::poly::disk::Error& e) {
+                if (e.fatal) {
+                    std::printf("FATAL %s\n", e.what());
+                    std::fflush(stdout);
+                    return 1;
+                }
+                std::printf("SERR %s 0 %s\n", e.kind, e.what());
+                std::fflush(stdout);
+            } catch (const std::exception& e) {
+                std::printf("SERR io 0 %s\n", e.what());
+                std::fflush(stdout);
+            }
             continue;
         }
         if (line.rfind("GEN ", 0) != 0 && line.rfind("GENI ", 0) != 0) {
@@ -1305,7 +1336,27 @@ int main(int argc, char** argv) {
         Session ss(engine, eos, cache, lookup);
         int rc = 0;
         if (want_serve) {
-            rc = serve(ss);
+            uint64_t sig = fnv1a(STRATA_VERSION, std::strlen(STRATA_VERSION));
+            for (int i = 0; i < argc; ++i) {
+                sig = fnv1a(argv[i], std::strlen(argv[i]) + 1, sig);
+            }
+            try {
+                const auto exe_size = std::filesystem::file_size(argv[0]);
+                const auto exe_stamp = std::filesystem::last_write_time(argv[0]).time_since_epoch().count();
+                sig = fnv1a(&exe_size, sizeof exe_size, sig);
+                sig = fnv1a(&exe_stamp, sizeof exe_stamp, sig);
+            } catch (const std::exception&) {}
+            // Reject a snapshot if the model was replaced at the same path and the argv stayed the same.
+            // Do not fingerprint the whole multi-GB GGUF: it would negate the hot-load benefit.
+            try {
+                const auto size = std::filesystem::file_size(o.model);
+                const auto stamp = std::filesystem::last_write_time(o.model).time_since_epoch().count();
+                sig = fnv1a(&size, sizeof size, sig);
+                sig = fnv1a(&stamp, sizeof stamp, sig);
+            } catch (const std::exception&) {
+                // The loaded model is present even if its file metadata cannot be read.
+            }
+            rc = serve(ss, sig);
         } else if ((long long) ids.size() + max_new > engine.max_context()) {
             throw std::runtime_error("the prompt and --max-new together exceed --max-context");
         } else if (check > 0) {

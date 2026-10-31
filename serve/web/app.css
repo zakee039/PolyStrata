@@ -1,3 +1,6 @@
+#session-picker { max-width: 215px; min-width: 105px; height: 34px; font-size: 12px; padding: 3px 8px; }
+@media (max-width: 640px) { #session-picker { max-width: 125px; min-width: 75px; } }
+
 /* PolyStrata web app - layout on top of tokens.css + components.css (the PolyStrata UI kit). Colours, type, radii and
    shadows come only from the kit's tokens. */
 [hidden] { display: none !important; }

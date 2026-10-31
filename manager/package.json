@@ -1,0 +1,21 @@
+{
+  "name": "polystrata-manager",
+  "private": true,
+  "version": "0.1.2",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "web:build": "tsc --noEmit && vite build",
+    "vite": "vite --host 127.0.0.1 --port 1420",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  }
+}

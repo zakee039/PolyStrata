@@ -3205,6 +3205,8 @@ class Service:
         self.keep_awake = None                        # #1727 (opt-in): serve.keepawake.KeepAwake, the config's "prevent_sleep"
         self.fifo = threading.Lock()
         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
+        self.session_v1 = None                         # optional shared Web/API chat and KV snapshots
+        self.session_v1_kv_enabled = False              # native engine must explicitly support SAVE/RESTORE
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
         # #458 (opt-in, the config's "effort_position": "end"): a non-default reasoning effort goes in a short system
@@ -3915,6 +3917,12 @@ class Service:
             if vision_started:
                 self.vision.unload()
             raise
+        if self.session_v1_kv_enabled and str(getattr(self.engine, "info", {}).get("session_files", "0")) != "1":
+            # An unloaded V1 engine must be checked after native READY, before restoring KV.
+            self.engine.unload()
+            if vision_started:
+                self.vision.unload()
+            raise EngineDied("this native engine lacks session file support (session_v1_kv)")
         print("[strata] the engine is running again", flush=True)
         if self.restore_after_load:                      # an image job unloaded it: its conversation comes back
             images_api.restore_session(self)
@@ -4024,7 +4032,11 @@ class Service:
                     return "busy"
             if idle_for is not None and time.time() - (self.last_request_at or self.started_at) < idle_for:
                 return "busy"
+            self._v1_save_active()           # save under FIFO before stopping the model
             self.engine.unload()
+            if self.session_v1:
+                self.session_v1.active_id = None
+                self.session_v1.active_dirty = False
             if self.vision is not None and hasattr(self.vision, "unload"):
                 self.vision.unload()
             self.vision_held = False
@@ -4055,6 +4067,64 @@ class Service:
                     print(f"[strata] idle unload: {e}", flush=True)
         self.idle_thread = threading.Thread(target=loop, daemon=True)
         self.idle_thread.start()
+
+    def _v1_model_key(self):
+        import hashlib
+        spawn = getattr(self.engine, "spawn", ())
+        exe = spawn[0] if spawn else ""
+        args = spawn[1] if len(spawn) > 1 else []
+        def identity(file):
+            try:
+                st = os.stat(file)
+                return [os.path.abspath(file), st.st_size, st.st_mtime_ns]
+            except OSError:
+                return [str(file)]
+        model_file = next((args[i + 1] for i, v in enumerate(args[:-1]) if v == "--model"), "")
+        args = [args, identity(exe), identity(model_file)]
+        return hashlib.sha256(json.dumps([self.model, args], default=str).encode()).hexdigest()
+
+    def _v1_save_active(self):
+        v1 = self.session_v1
+        if not v1 or not self.session_v1_kv_enabled or not v1.active_id or not v1.active_dirty or not self.loaded():
+            return
+        ident = v1.active_id
+        try:
+            result = self.engine.session_file("save", str(v1.snapshot_path(ident)))
+            v1.registered_snapshot(ident, self._v1_model_key(), result["tokens"])
+            v1.active_dirty = False
+            print(f"[strata] V1 saved KV: {ident}, {result['tokens']} tokens in {result['ms']:.0f} ms", flush=True)
+        except Exception as e:
+            print(f"[strata] V1 KV save skipped ({ident}): {e}; full prefill remains available", flush=True)
+
+    def _v1_before_generate(self, sampling):
+        # All session changes happen under the same FIFO as the actual inference.
+        v1 = self.session_v1
+        if not v1 or not self.session_v1_kv_enabled:
+            return
+        gen = getattr(self.engine, "gen", None)
+        if getattr(v1, "active_gen", None) != gen:
+            v1.active_id, v1.active_dirty, v1.active_gen = None, False, gen
+        ident = (sampling or {}).get("strata_session_id")
+        if ident is not None:
+            from serve.session_v1 import valid_id
+            valid_id(ident)
+        if ident == v1.active_id:
+            return
+        self._v1_save_active()
+        v1.active_id, v1.active_dirty = ident, False
+        if ident is None:
+            return
+        path = v1.restore_path(ident, self._v1_model_key())
+        if not path:
+            return
+        try:
+            r = self.engine.session_file("restore", path)
+            print(f"[strata] V1 restored KV: {ident}, {r['tokens']} tokens in {r['ms']:.0f} ms", flush=True)
+        except Exception as e:
+            print(f"[strata] V1 KV restore failed ({ident}): {e}; discarding snapshot", flush=True)
+            v1.abandon_snapshot(ident)
+            if not self.loaded():
+                self.ensure_loaded()
 
     def set_shared(self, defaults) -> dict:
         """The Chat settings every client gets for what it leaves out; {} / None = clients use their own again."""
@@ -4856,6 +4926,8 @@ class Service:
                             with self.status_lock:
                                 self.status["queued"] -= 1
                         raise
+                    if not par:
+                        self._v1_before_generate(sampling)
                     with self.status_lock:
                         if par:
                             self.status["queued"] -= 1
@@ -5163,6 +5235,8 @@ class Service:
                             if os.environ.get("STRATA_DEBUG") and raw_ids:
                                 print(f"[strata] raw: {self.tok.decode(raw_ids)!r}", flush=True)
                         st["busy"] = False
+                        if self.session_v1 and not par and self.session_v1.active_id is not None:
+                            self.session_v1.active_dirty = True
                         st.pop("tail", None)                     # #212: the answer's end is not kept once it is done
                         st.pop("tool", None)
                         if par:
@@ -5986,6 +6060,22 @@ def make_handler(svc: Service):
                                records if request_id else {"requests": records, "retention": 100, "persistent": False,
                                                           "loaded": svc.loaded(), "auto_load": hasattr(svc.engine, "restart")})
                 return
+            if path == "/v1/strata/sessions" or path.startswith("/v1/strata/sessions/"):
+                if not self._authorized():
+                    return
+                if not svc.session_v1:
+                    self._json(404, {"error": {"message": "V1 sessions disabled"}})
+                    return
+                if path == "/v1/strata/sessions":
+                    self._json(200, {"sessions": svc.session_v1.list()})
+                    return
+                try:
+                    item = svc.session_v1.get(path[len("/v1/strata/sessions/"):])
+                    self._json(200 if item else 404, item if item else
+                               {"error": {"message": "session not found"}})
+                except ValueError as e:
+                    self._json(400, {"error": {"message": str(e)}})
+                return
             if path == "/settings":
                 if self._authorized():
                     self._json(200, {"shared": bool(svc.shared), "defaults": svc.shared})
@@ -6129,6 +6219,17 @@ def make_handler(svc: Service):
                 req = json.loads(self._body() or b"{}")
                 if not isinstance(req, dict):
                     raise ValueError("send a JSON object")
+                if path == "/v1/strata/sessions":
+                    if not svc.session_v1:
+                        self._json(404, {"error": {"message": "V1 sessions disabled"}})
+                        return
+                    from serve.session_v1 import valid_id
+                    ident = valid_id(req.get("id"))
+                    if "web_messages" not in req:
+                        raise ValueError("web_messages array required")
+                    svc.session_v1.store_web(ident, req["web_messages"])
+                    self._json(200, {"id": ident, "saved": True})
+                    return
                 if path.startswith("/v1/responses/"):        # retrieve/delete/cancel/compact: nothing is stored
                     self._json(404, responses_error_body("this server keeps no responses (stateless); send the "
                                                          "whole conversation to POST /v1/responses", code="not_found"))
@@ -6275,6 +6376,11 @@ def make_handler(svc: Service):
                                                       "with --images qwen-image)"}})
                 return
             job = images_api.parse_request(req, gen.cfg)        # ImageRequestError (a ValueError): 400
+            if svc.session_v1:
+                # Generated images belong to this deployment even when the client requests base64.
+                gen.dir = svc.session_v1.root / "generated-images"
+                gen.dir.mkdir(parents=True, exist_ok=True)
+                gen.keep_files = 2**31 - 1
             svc.last_request_at = time.time()
             cancel = threading.Event()
             self._watch_client(cancel)
@@ -6288,6 +6394,9 @@ def make_handler(svc: Service):
                                            "message": str(e)}})
                 return
             figures["gpu_policy"] = policy
+            if svc.session_v1 and job["response_format"] != "url":
+                for png in images:
+                    gen.store(png)  # base64 responses also get durable PNG files
             print(f"[strata] image done in {figures['seconds']:.1f} s ({policy})", flush=True)
             host = self.headers.get("Host") or f"{self.server.server_address[0]}:{self.server.server_address[1]}"
             scheme = "https" if (self.headers.get("X-Forwarded-Proto") or "").lower() == "https" else "http"
@@ -6541,6 +6650,13 @@ def make_handler(svc: Service):
             req = svc.with_shared(req, "openai")
             bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
             messages, tools, kw = openai_to_messages(req)
+            session_id = req.get("strata_session_id")
+            original_messages = req.get("messages", [])
+            if session_id is not None:
+                from serve.session_v1 import valid_id
+                valid_id(session_id)
+                if not svc.session_v1:
+                    raise ValueError("strata_session_id requires session_v1_dir in the model config")
             self._no_local_images(messages)
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # as the Responses route: no tools are offered
                 tools = None
@@ -6566,6 +6682,8 @@ def make_handler(svc: Service):
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
             cancel = self.cancel                             # watched since _post() (#430 #431 #1999)
+            if session_id:
+                svc.session_v1.store_api(session_id, original_messages)
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req, cancel=cancel)
             _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
             run = run_with_mcp(svc, svc.mcp, messages, tools, kw, ids, thinking, max_new, max_req, req, cancel,
@@ -6574,6 +6692,29 @@ def make_handler(svc: Service):
             if validator is not None:
                 chunks = structured_chunks(chunks, validator)
             chunks = self._capture(chunks, "openai")
+            if session_id:
+                def durable(chunks):
+                    content, reasoning, tool_parts, finished = [], [], {}, False
+                    try:
+                        for c in chunks:
+                            if c is not None:
+                                for choice in c.get("choices") or []:
+                                    d = choice.get("delta") or {}
+                                    if d.get("content"):
+                                        content.append(d["content"])
+                                    if d.get("reasoning_content"):
+                                        reasoning.append(d["reasoning_content"])
+                                    if choice.get("finish_reason") is not None:
+                                        finished = True
+                            yield c
+                    finally:
+                        if finished:
+                            try:
+                                svc.session_v1.store_reply(session_id, original_messages,
+                                                           "".join(content), "".join(reasoning))
+                            except Exception as e:
+                                print(f"[strata] V1 reply persistence failed: {e}", flush=True)
+                chunks = durable(chunks)
             if not req.get("stream"):
                 return self._json(200, openai_collect(chunks))
             self._sse()
@@ -7749,6 +7890,22 @@ def main() -> int:
             raise SystemExit(f"[strata] {e}")
         print(f"[strata] slot save/restore on: {svc.slot_save_path} (session files are kept until deleted: "
               "about 1.2 GB per 63K-token conversation; restore only files this server wrote)", flush=True)
+    if cfg.get("session_v1_dir"):
+        from serve.session_v1 import SessionV1
+        if getattr(svc.engine, "batch", 0):
+            raise SystemExit("[strata] session_v1_dir requires single-slot inference")
+        svc.session_v1 = SessionV1(cfg["session_v1_dir"], max_snapshots=5,
+                                  kv_directory=cfg.get("session_v1_kv_dir"))
+        svc.session_v1_kv_enabled = bool(cfg.get("session_v1_kv", False))
+        # A lazy engine has not sent its READY/capabilities yet. Validate at first real load.
+        if svc.session_v1_kv_enabled and not getattr(svc.engine, "unloaded", False) and \
+                str(getattr(svc.engine, "info", {}).get("session_files", "0")) != "1":
+            raise SystemExit("[strata] this native engine lacks session file support; set session_v1_kv=false")
+        if svc.session_v1_kv_enabled and not svc.slot_save_path:
+            # V1 uses the engine's private session API, not the public /slots path.
+            svc.slot_save_path = str(svc.session_v1.kv_dir)
+        print(f"[strata] V1 unified conversations: {svc.session_v1.root}; "
+              f"KV snapshots {'on' if svc.session_v1_kv_enabled else 'off'}", flush=True)
     etu = cfg.get("env_to_user", False)                # opt-in: see frontend._env_to_user
     if not isinstance(etu, bool):
         raise SystemExit(f"[strata] config \"env_to_user\" must be true or false, not {etu!r}")

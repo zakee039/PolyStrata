@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
+#include <stdexcept>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -185,6 +187,39 @@ public:
     }
 
     /// The parked conversations, the bytes they hold, and how many were pushed out so far.
+    struct DiskPoint {
+        int64_t count = 0;
+        const int32_t* tokens = nullptr;
+        const uint8_t* state = nullptr;  // null: save engine state at its current position
+    };
+    // Prefer a checkpoint before the output tail, so we can replay a changed tail safely.
+    DiskPoint disk_point() const {
+        const Slot& s = cur();
+        if (s.seq.empty()) return {};
+        if (!s.marks.empty() && s.marks.back().pos > 0) {
+            const Checkpoint& m = s.marks.back();
+            return {m.pos, s.seq.data(), m.state->p.get()};
+        }
+        return {(int64_t) s.seq.size(), s.seq.data(), nullptr};
+    }
+    // Called only after the file has been validated and its rows uploaded.
+    void disk_adopt(std::vector<int32_t> tokens, const uint8_t* state) {
+        if (tokens.empty() || !state) throw std::logic_error("disk_adopt: invalid checkpoint");
+        e_.load_state(state, (int64_t) tokens.size());
+        slots_.assign(slots_.size(), Slot{});
+        cur_ = 0;
+        due_.clear();
+        after_.clear();
+        turn_ = -1;
+        Slot& s = cur();
+        s.seq = std::move(tokens);
+        s.prompt = (int64_t) s.seq.size();
+        s.stamp = ++clock_;
+        const BlobPtr b = blob(e_.state_bytes());
+        if (!b) throw std::bad_alloc();
+        std::memcpy(b->p.get(), state, e_.state_bytes());
+        s.marks.push_back({(int64_t) s.seq.size(), b});
+    }
     size_t parked() const { return held(slots_.size()).count; }
     size_t parked_bytes() const { return held(slots_.size()).bytes; }
     size_t evictions() const { return evictions_; }

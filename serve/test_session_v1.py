@@ -1,0 +1,123 @@
+"""V1 durable conversation and bounded snapshot metadata tests. No GPU required."""
+import tempfile
+import unittest
+
+from serve.session_v1 import SessionV1, valid_id
+
+
+class TestSessionV1(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = SessionV1(self.tmp.name, max_snapshots=5)
+
+    def test_web_and_api_same_record(self):
+        self.store.store_web("shared_1", [{"role": "user", "text": "web content"}])
+        self.store.store_api("shared_1", [{"role": "user", "content": "api content"}])
+        self.store.store_reply("shared_1", [{"role": "user", "content": "api content"}], "answer")
+        item = self.store.get("shared_1")
+        self.assertEqual(item["web_messages"][0]["text"], "web content")
+        self.assertEqual(item["api_messages"][-1]["content"], "answer")
+        self.assertEqual(len(self.store.list()), 1)
+
+    def test_fifo_does_not_delete_chat(self):
+        for n in range(6):
+            ident = f"chat_{n}"
+            self.store.store_web(ident, [{"role": "user", "text": ident}])
+            self.store.snapshot_path(ident).write_bytes(b"dummy snapshot")
+            self.store.registered_snapshot(ident, "same-model", 1024)
+        self.assertEqual(self.store.snapshot_count(), 5)
+        self.assertFalse(self.store.snapshot_path("chat_0").exists())
+        self.assertTrue(self.store.get("chat_0")["web_messages"])
+        self.assertEqual(self.store.get("chat_0")["snapshot_seq"], 0)
+        self.store.snapshot_path("chat_0").write_bytes(b"fresh")
+        self.store.registered_snapshot("chat_0", "same-model", 2048)
+        self.assertEqual(self.store.snapshot_count(), 5)
+        self.assertFalse(self.store.snapshot_path("chat_1").exists())
+        self.assertTrue(self.store.get("chat_1")["web_messages"])
+
+    def test_restart_and_incompatible_snapshot(self):
+        self.store.store_web("same_1", [{"role": "user", "text": "saved"}])
+        self.store.snapshot_path("same_1").write_bytes(b"placeholder")
+        self.store.registered_snapshot("same_1", "v1", 500)
+        reopened = SessionV1(self.tmp.name)
+        self.assertEqual(reopened.get("same_1")["web_messages"][0]["text"], "saved")
+        self.assertIsNone(reopened.restore_path("same_1", "v2"))
+        self.assertIsNotNone(reopened.restore_path("same_1", "v1"))
+        reopened.abandon_snapshot("same_1")
+        self.assertIsNone(reopened.restore_path("same_1", "v1"))
+
+    def test_service_switch_and_restart(self):
+        from pathlib import Path
+        from serve.server import Service
+
+        class Native:
+            gen = 1
+            spawn = ("missing-engine.exe", ["--model", "missing-model.gguf"])
+            def __init__(self):
+                self.actions = []
+            def session_file(self, action, path):
+                self.actions.append((action, Path(path).name))
+                if action == "save":
+                    Path(path).write_bytes(b"VALID")
+                else:
+                    assert Path(path).read_bytes() == b"VALID"
+                return {"tokens": 128, "ms": 0.1, "bytes": 5}
+
+        svc = Service.__new__(Service)
+        svc.engine = Native()
+        svc.model = "test-model"
+        svc.session_v1 = self.store
+        svc.session_v1_kv_enabled = True
+        svc.loaded = lambda: True
+        for ident in ("first", "second"):
+            self.store.store_web(ident, [{"role": "user", "text": ident}])
+            svc._v1_before_generate({"strata_session_id": ident})
+            self.store.active_dirty = True
+        self.assertEqual(svc.engine.actions, [("save", "first.bin")])
+        svc.engine.gen += 1
+        svc._v1_before_generate({"strata_session_id": "first"})
+        self.assertEqual(svc.engine.actions[-1], ("restore", "first.bin"))
+        self.assertEqual(self.store.get("second")["web_messages"][0]["text"], "second")
+
+    def test_image_and_attachment_files_are_durable(self):
+        import base64
+        from pathlib import Path
+        raw = b"\x89PNG\r\n\x1a\n" + b"minimal-image-test-data"
+        url = "data:image/png;base64," + base64.b64encode(raw).decode()
+        ident = "with_images"
+        message = {"role": "user", "text": "Photo with a note",
+                   "images": [{"kind": "image", "name": "example.png", "url": url}],
+                   "files": [{"kind": "file", "name": "note.txt", "text": "Hello attached text!"}]}
+        self.store.store_web(ident, [message])
+        self.store.store_api(ident, [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": url}},
+            {"type": "text", "text": "describe it"}]}])
+        root = Path(self.tmp.name)
+        images = list((root / "images" / ident).glob("*.png"))
+        texts = list((root / "attachments" / ident).glob("*.txt"))
+        self.assertEqual(len(images), 1)
+        self.assertEqual(len(texts), 1)
+        self.assertEqual(images[0].read_bytes(), raw)
+        self.assertEqual(texts[0].read_text(encoding="utf-8"), "Hello attached text!")
+        db = self.store.db_path.read_bytes()
+        self.assertNotIn(base64.b64encode(raw), db)
+        reopened = SessionV1(self.tmp.name)
+        self.assertEqual(reopened.get(ident)["web_messages"][0]["images"][0]["url"], url)
+        self.assertEqual(reopened.get(ident)["web_messages"][0]["files"][0]["text"], "Hello attached text!")
+        self.assertEqual(reopened.get(ident)["api_messages"][0]["content"][0]["image_url"]["url"], url)
+
+    def test_malformed_images_refused(self):
+        ident = "bad_image"
+        with self.assertRaises(ValueError):
+            self.store.store_web(ident, [{"role": "user", "images": [
+                {"name": "fake.png", "url": "data:image/png;base64,YWJj"}]}])
+
+    def test_invalid_identifiers(self):
+        for ident in ("../escape", "/tmp/p", "a.b", "", "a" * 65):
+            with self.assertRaises(ValueError):
+                valid_id(ident)
+
+
+if __name__ == "__main__":
+    unittest.main()
