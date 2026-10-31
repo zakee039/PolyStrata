@@ -59,3 +59,51 @@
 .port-actions{display:flex;gap:10px;align-items:center}
 .port-actions .mini-primary{margin-top:0;align-self:stretch}
 .api-page{padding-bottom:16px}
+/* v0.1.4: one-line API controls and a two-column monitoring strip. */
+.api-compact{padding:5px 0 14px}
+.api-compact .setting-card{padding:7px 15px;margin-bottom:10px}
+.api-compact .api-line{display:flex;align-items:center;min-width:0;min-height:52px;gap:9px;border-bottom:1px solid #edf3f1}
+.api-compact .api-line:last-child{border-bottom:0}
+.api-compact .api-line>strong,.api-compact .api-line>label{flex:0 0 62px;font-size:12px;font-weight:600;color:#365758;white-space:nowrap}
+.api-compact .api-line .field{width:auto;flex:1 1 auto;min-width:0;height:34px;font-size:11px;padding:7px 10px}
+.api-compact .api-line .port-field{flex:0 0 89px;width:89px}
+.api-compact .api-line .outline-small{padding:7px 10px;border-radius:7px;min-width:42px}
+.api-compact .key-mask{flex:1;min-width:0;font-size:12px;color:#90a5a5;letter-spacing:1.4px;overflow:hidden;white-space:nowrap}
+.api-compact .toggle-compact{cursor:pointer}
+.api-compact .toggle-compact .line-fill{flex:1}
+.api-compact .toggle-compact input{position:absolute;opacity:0;pointer-events:none}
+.api-compact .toggle-compact .switch{margin-left:auto}
+.api-compact .tunnel-heading{height:44px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #edf3f1}
+.api-compact .tunnel-heading>strong{font-size:13px}
+.api-compact .tunnel-panel .api-line>label{flex-basis:48px}
+.api-compact .tunnel-actions{display:flex;align-items:center;gap:7px;min-height:46px}
+.api-compact .tunnel-actions button{flex:0 0 auto;padding:8px 10px;font-size:11px;border-radius:8px}
+.primary-small{background:#2da99e;color:white;border:1px solid #2da99e;font-weight:650}
+.primary-small:hover:enabled{background:#24988f}
+.api-compact .tunnel-meta{display:flex;gap:7px;align-items:center;flex:1;min-width:0;font-size:10px;color:#8da4a3;overflow:hidden}
+.api-compact .tunnel-meta [data-cf-latency]{white-space:nowrap;font-variant-numeric:tabular-nums;color:#3d8480}
+.api-compact .tunnel-meta [data-cf-message]{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cf-indicator{display:inline-flex;gap:5px;align-items:center;font-size:10px;font-weight:600;white-space:nowrap;color:#849999}
+.cf-indicator i{display:inline-block;background:currentColor;border-radius:50%;height:7px;width:7px}
+.cf-indicator.on{color:#249f83}.cf-indicator.pending{color:#c89c42}.cf-indicator.off{color:#9baaaa}
+.monitor-bottom{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:9px;margin:0 0 9px}
+.half-card{border:1px solid #e2ece9;background:white;border-radius:14px;min-width:0;min-height:113px}
+.monitor-bottom .cache{padding:12px 13px 10px;margin:0}
+.monitor-bottom .cache-title{font-size:11px;gap:6px}
+.monitor-bottom .cache-title strong{font-size:14px}
+.monitor-bottom .track{margin:18px 0 12px}
+.monitor-bottom .mini-sub{font-size:10px;color:#91a5a4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tunnel-monitor{padding:11px 12px 10px}
+.tunnel-monitor-head{display:flex;align-items:center;justify-content:space-between;gap:5px;font-size:11px}
+.tunnel-monitor-head b{font-size:11px;white-space:nowrap}
+.tunnel-monitor-head .cf-indicator{font-size:9px}
+.tunnel-monitor-latency{display:flex;align-items:baseline;gap:8px;margin:11px 0 7px}
+.tunnel-monitor-latency span{font-size:16px;font-weight:700;color:#295456;font-variant-numeric:tabular-nums}
+.tunnel-monitor-latency small{font-size:9px;color:#90a3a3}
+.monitor-buttons{display:flex;gap:7px}
+.monitor-buttons button{flex:1;border:1px solid #dbe9e6;background:#f7fbfa;padding:5px 4px;border-radius:6px;color:#388c84;font-size:10px}
+.monitor-buttons button:hover:enabled{background:#e7f6f1}
+.compact-settings{padding-top:5px}
+.compact-settings .setting-card{margin-bottom:0}
+.workflow-label{font-size:13px;font-weight:700;color:#537877;margin:5px 2px 12px}
+.api-compact .api-line .key-display{flex:1 1 0;min-width:0;font:10px/1.3 Consolas,monospace;color:#557a7a;padding:7px 8px}

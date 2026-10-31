@@ -76,6 +76,8 @@ struct Inner {
     child: Option<Child>,
     cf_child: Option<Child>,
     cf_error: String,
+    cf_latency_ms: Option<u64>,
+    cf_test_status: String,
     desired: bool,
     stopping: bool,
     error: String,
@@ -254,15 +256,104 @@ fn spawn_backend(p: &Preferences) -> Result<Child, String> {
     }
     cmd.spawn().map_err(|e| format!("服务启动失败：{e}"))
 }
+const CF_METRICS: &str = "http://127.0.0.1:23188/metrics";
+
+fn cloudflared_binary(p: &Preferences) -> String {
+    let candidates = [
+        p.cf_binary.as_str(),
+        r"C:\Program Files (x86)\cloudflared\cloudflared.exe",
+        r"C:\Program Files\cloudflared\cloudflared.exe",
+        "cloudflared.exe",
+    ];
+    candidates
+        .iter()
+        .find(|s| {
+            !s.trim().is_empty()
+                && (Path::new(s).is_file()
+                    || Command::new(s)
+                        .arg("--version")
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .output()
+                        .is_ok_and(|o| o.status.success()))
+        })
+        .unwrap_or(&"cloudflared.exe")
+        .to_string()
+}
+
+fn valid_hostname(value: &str) -> bool {
+    let labels: Vec<_> = value.split('.').collect();
+    value.len() <= 253
+        && labels.len() >= 2
+        && !value.eq_ignore_ascii_case("localhost")
+        && !value.ends_with(".local")
+        && value.parse::<std::net::IpAddr>().is_err()
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+fn cf_connection_count() -> Option<u32> {
+    let body = ureq::get(CF_METRICS)
+        .timeout(Duration::from_millis(450))
+        .call()
+        .ok()?
+        .into_string()
+        .ok()?;
+    body.lines()
+        .filter(|line| !line.starts_with('#'))
+        .find_map(|line| {
+            let (name, value) = line.split_once(' ')?;
+            if !name.starts_with("cloudflared_tunnel_ha_connections") {
+                return None;
+            }
+            value.trim().parse::<f64>().ok().map(|v| v.max(0.0) as u32)
+        })
+}
+
+// A real end-to-end HTTPS probe. No API key or Tunnel Token ever leaves the PC.
+// A matching 401 from PolyStrata proves that Cloudflare reached this backend.
+fn cf_probe(hostname: &str) -> Result<(u64, bool, u16), String> {
+    if !valid_hostname(hostname) {
+        return Err("请输入有效的公开域名，例如 llm.example.com".into());
+    }
+    let url = format!("https://{hostname}/v1/models");
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(7))
+        .redirects(0)
+        .build();
+    let start = Instant::now();
+    let response = agent.get(&url).call();
+    let (code, mut body) = match response {
+        Ok(resp) => {
+            let code = resp.status();
+            let mut s = String::new();
+            resp.into_reader().take(4096).read_to_string(&mut s).ok();
+            (code, s)
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            let mut s = String::new();
+            resp.into_reader().take(4096).read_to_string(&mut s).ok();
+            (code, s)
+        }
+        Err(e) => return Err(format!("无法访问 HTTPS 域名：{e}")),
+    };
+    let latency = start.elapsed().as_millis().min(100_000) as u64;
+    let ok = code == 401 && body.contains("missing or wrong API key");
+    body.clear();
+    Ok((latency, ok, code))
+}
+
 fn spawn_tunnel(p: &Preferences) -> Result<Child, String> {
     let token = security::read("cf-tunnel-token")?
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| "Cloudflare Tunnel Token 未配置".to_string())?;
-    let binary = if p.cf_binary.trim().is_empty() {
-        "cloudflared.exe"
-    } else {
-        p.cf_binary.trim()
-    };
+    let binary = cloudflared_binary(p);
     fs::create_dir_all(state_dir()).map_err(|e| e.to_string())?;
     let file = OpenOptions::new()
         .append(true)
@@ -271,12 +362,18 @@ fn spawn_tunnel(p: &Preferences) -> Result<Child, String> {
         .map_err(|e| e.to_string())?;
     let err = file.try_clone().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(binary);
-    cmd.args(["tunnel", "--no-autoupdate", "run"])
-        .env("TUNNEL_TOKEN", token)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(file))
-        .stderr(Stdio::from(err))
-        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+    cmd.args([
+        "tunnel",
+        "--metrics",
+        "127.0.0.1:23188",
+        "--no-autoupdate",
+        "run",
+    ])
+    .env("TUNNEL_TOKEN", token)
+    .stdin(Stdio::null())
+    .stdout(Stdio::from(file))
+    .stderr(Stdio::from(err))
+    .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     cmd.spawn()
         .map_err(|e| format!("无法启动 cloudflared，请检查安装路径：{e}"))
 }
@@ -412,7 +509,18 @@ async fn load_model(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 async fn get_status(state: State<'_, AppState>) -> Result<Value, String> {
-    let (prefs, owned, stopping, error, desired, restarts, cf_running, cf_error) = {
+    let (
+        prefs,
+        owned,
+        stopping,
+        error,
+        desired,
+        restarts,
+        cf_running,
+        cf_error,
+        cf_latency_ms,
+        cf_test_status,
+    ) = {
         let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
         let owned = guard.child.as_mut().is_some_and(child_running);
         let cf_running = guard.cf_child.as_mut().is_some_and(child_running);
@@ -425,16 +533,23 @@ async fn get_status(state: State<'_, AppState>) -> Result<Value, String> {
             guard.restarts,
             cf_running,
             guard.cf_error.clone(),
+            guard.cf_latency_ms,
+            guard.cf_test_status.clone(),
         )
     };
-    let (metrics, host_gpu) = tauri::async_runtime::spawn_blocking(move || {
+    let (metrics, host_gpu, cf_connections) = tauri::async_runtime::spawn_blocking(move || {
         let metrics = api_get(prefs.port, "/metrics").ok();
         let gpu = if metrics.is_none() {
             gpu_memory_without_service()
         } else {
             None
         };
-        (metrics, gpu)
+        let connections = if cf_running {
+            cf_connection_count()
+        } else {
+            None
+        };
+        (metrics, gpu, connections)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -458,6 +573,7 @@ async fn get_status(state: State<'_, AppState>) -> Result<Value, String> {
         json!({"phase":phase, "managed":owned, "desired":desired, "error":error,
         "restarts":restarts,"settings":state.inner.lock().map_err(|e| e.to_string())?.prefs.clone(),
         "metrics":metrics,"host_gpu":host_gpu,"cf_running":cf_running,
+        "cf_connections":cf_connections,"cf_latency_ms":cf_latency_ms,"cf_test_status":cf_test_status,
         "cf_error":cf_error, "cf_token_present":security::read("cf-tunnel-token")?.is_some(),
         "api_key_present":security::read("api-key")?.is_some()}),
     )
@@ -516,6 +632,176 @@ fn save_tunnel_token(state: State<'_, AppState>, token: String) -> Result<(), St
         );
     }
     security::store("cf-tunnel-token", token)
+}
+
+fn ensure_cloudflared_installed(p: &Preferences) -> Result<String, String> {
+    let candidate = cloudflared_binary(p);
+    if Command::new(&candidate)
+        .arg("--version")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .is_ok_and(|r| r.status.success())
+    {
+        return Ok(candidate);
+    }
+    let result = Command::new("winget.exe")
+        .args([
+            "install",
+            "--id",
+            "Cloudflare.cloudflared",
+            "--exact",
+            "--source",
+            "winget",
+            "--silent",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+            "--disable-interactivity",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("无法启动 Windows 软件安装器：{e}"))?;
+    if !result.status.success() {
+        return Err(
+            "cloudflared 安装失败，请检查 winget 或手动安装 Cloudflare Tunnel 客户端".into(),
+        );
+    }
+    let fresh = cloudflared_binary(p);
+    if Command::new(&fresh)
+        .arg("--version")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .is_ok_and(|r| r.status.success())
+    {
+        Ok(fresh)
+    } else {
+        Err("安装完成，但未发现 cloudflared.exe；请重新启动 Manager".into())
+    }
+}
+
+#[tauri::command]
+async fn tunnel_install(
+    app: tauri::AppHandle,
+    hostname: String,
+    token: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let hostname = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
+        if !valid_hostname(&hostname) {
+            return Err("请输入有效的 Tunnel 公网域名".into());
+        }
+        let state = app.state::<AppState>();
+        let prefs = state.inner.lock().map_err(|e| e.to_string())?.prefs.clone();
+        let binary = ensure_cloudflared_installed(&prefs)?;
+        if token.trim().is_empty() {
+            if security::read("cf-tunnel-token")?.is_none() {
+                return Err("请输入 Cloudflare Tunnel Token".into());
+            }
+        } else {
+            let token = token.trim();
+            if token.len() < 50
+                || token.len() > 4096
+                || !token
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_=.".contains(&b))
+            {
+                return Err("Tunnel Token 格式无效".into());
+            }
+            security::store("cf-tunnel-token", token)?;
+        }
+        let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
+        let mut updated = guard.prefs.clone();
+        updated.cf_enabled = true;
+        updated.cf_hostname = hostname;
+        updated.cf_binary = binary;
+        save_prefs(&updated)?;
+        guard.prefs = updated.clone();
+        guard.cf_latency_ms = None;
+        guard.cf_test_status.clear();
+        if guard.child.as_mut().is_some_and(child_running) {
+            stop_tunnel(&mut guard.cf_child);
+            match spawn_tunnel(&updated) {
+                Ok(child) => {
+                    guard.cf_child = Some(child);
+                    guard.cf_error.clear();
+                }
+                Err(e) => {
+                    guard.cf_error = e.clone();
+                    return Err(e);
+                }
+            }
+            Ok("Tunnel 已配置并启动连接器".into())
+        } else {
+            Ok("Tunnel 已安装，启动推理服务后自动连接".into())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn tunnel_test(app: tauri::AppHandle) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let hostname = state
+            .inner
+            .lock()
+            .map_err(|e| e.to_string())?
+            .prefs
+            .cf_hostname
+            .clone();
+        let result = cf_probe(&hostname);
+        let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
+        match result {
+            Ok((ms, ok, code)) => {
+                guard.cf_latency_ms = Some(ms);
+                guard.cf_test_status = if ok {
+                    "外网可达".into()
+                } else {
+                    format!("HTTP {code} · 路由未验证")
+                };
+                Ok(json!({"reachable":ok,"http_status":code,"latency_ms":ms,
+                           "message":guard.cf_test_status}))
+            }
+            Err(e) => {
+                guard.cf_latency_ms = None;
+                guard.cf_test_status = e.clone();
+                Err(e)
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn tunnel_restart(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
+        if !guard.prefs.cf_enabled {
+            return Err("请先安装 Tunnel".into());
+        }
+        if !guard.child.as_mut().is_some_and(child_running) {
+            return Err("推理服务未运行；启动服务后才能重启 Tunnel".into());
+        }
+        stop_tunnel(&mut guard.cf_child);
+        guard.cf_latency_ms = None;
+        guard.cf_test_status.clear();
+        let prefs = guard.prefs.clone();
+        match spawn_tunnel(&prefs) {
+            Ok(child) => {
+                guard.cf_child = Some(child);
+                guard.cf_error.clear();
+                Ok("连接器已重新启动".into())
+            }
+            Err(e) => {
+                guard.cf_error = e.clone();
+                Err(e)
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -842,6 +1128,8 @@ pub fn self_test() -> i32 {
             child: None,
             cf_child: None,
             cf_error: String::new(),
+            cf_latency_ms: None,
+            cf_test_status: String::new(),
             desired: false,
             stopping: false,
             error: String::new(),
@@ -911,6 +1199,8 @@ pub fn run() {
                 child: None,
                 cf_child: None,
                 cf_error: String::new(),
+                cf_latency_ms: None,
+                cf_test_status: String::new(),
                 desired: false,
                 stopping: false,
                 error: String::new(),
@@ -929,6 +1219,9 @@ pub fn run() {
             replace_api_key,
             generate_api_key,
             save_tunnel_token,
+            tunnel_install,
+            tunnel_test,
+            tunnel_restart,
             list_models,
             register_config,
             get_log,
