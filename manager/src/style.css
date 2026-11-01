@@ -73,6 +73,9 @@
 .api-compact .toggle-compact .line-fill{flex:1}
 .api-compact .toggle-compact input{position:absolute;opacity:0;pointer-events:none}
 .api-compact .toggle-compact .switch{margin-left:auto}
+.api-compact .toggle-compact input:checked + .switch{background:#39c5bb}
+.api-compact .toggle-compact input:checked + .switch:before{transform:translateX(16px)}
+.api-compact .toggle-compact input:focus-visible + .switch{outline:2px solid #238f86;outline-offset:3px}
 .api-compact .tunnel-heading{height:44px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #edf3f1}
 .api-compact .tunnel-heading>strong{font-size:13px}
 .api-compact .tunnel-panel .api-line>label{flex-basis:48px}

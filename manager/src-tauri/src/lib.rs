@@ -151,7 +151,12 @@ fn save_prefs(p: &Preferences) -> Result<(), String> {
 fn initial_prefs() -> Preferences {
     let mut p: Preferences = fs::read(settings_file())
         .ok()
-        .and_then(|data| serde_json::from_slice(&data).ok())
+        .and_then(|data| {
+            // Accept UTF-8 BOM so a Windows-origin edit cannot silently reset
+            // the LAN/Tunnel choices to defaults on the next launch.
+            let bytes = data.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&data);
+            serde_json::from_slice(bytes).ok()
+        })
         .unwrap_or_default();
     p.autostart = registry_has_autostart();
     p
