@@ -1127,7 +1127,18 @@ fn open_url(port: u16) -> Result<(), String> {
 fn show(app: &tauri::AppHandle, position: Option<(i32, i32)>) {
     if let Some(w) = app.get_webview_window("main") {
         if let Some((x, y)) = position {
-            if let (Ok(Some(monitor)), Ok(size)) = (w.current_monitor(), w.outer_size()) {
+            // A hidden window can be associated with a different monitor than the tray.
+            // Resolve the monitor containing the actual tray click position.
+            let tray_monitor = w.available_monitors().ok().and_then(|monitors| {
+                monitors.into_iter().find(|monitor| {
+                    let p = monitor.position();
+                    let s = monitor.size();
+                    x >= p.x && y >= p.y
+                        && (x as i64) < p.x as i64 + s.width as i64
+                        && (y as i64) < p.y as i64 + s.height as i64
+                })
+            });
+            if let (Some(monitor), Ok(size)) = (tray_monitor, w.outer_size()) {
                 let mpos = monitor.position();
                 let msize = monitor.size();
                 let mw = msize.width as i32;
@@ -1141,8 +1152,19 @@ fn show(app: &tauri::AppHandle, position: Option<(i32, i32)>) {
                 let _ = w.set_position(Position::Physical(tauri::PhysicalPosition::new(px, py)));
             }
         }
+        let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+    }
+}
+
+// Tray and single-instance callbacks can be delivered from worker threads.
+// Schedule visibility and focus on Tauri's main event loop; otherwise a
+// hidden WebView window may remain invisible after closing to the tray.
+fn request_show(app: &tauri::AppHandle, position: Option<(i32, i32)>) {
+    let handle = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || show(&handle, position)) {
+        eprintln!("PolyStrata: unable to dispatch window show: {error}");
     }
 }
 
@@ -1288,7 +1310,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show(app, None);
+            request_show(app, None);
         }))
         .manage(AppState {
             inner: Mutex::new(Inner {
@@ -1345,7 +1367,7 @@ pub fn run() {
                 .on_menu_event(|app, event| {
                     let id = event.id().as_ref();
                     match id {
-                        "open" => show(app, None),
+                        "open" => request_show(app, None),
                         "load" | "unload" => {
                             let app2 = app.clone();
                             let loading = id == "load";
@@ -1403,7 +1425,7 @@ pub fn run() {
                                     app2.exit(0);
                                 } else if let Err(e) = result {
                                     let _ = app2.emit("manager-error", e);
-                                    show(&app2, None);
+                                    request_show(&app2, None);
                                 }
                             });
                         }
@@ -1411,16 +1433,24 @@ pub fn run() {
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::DoubleClick {
-                        button: MouseButton::Left,
-                        position,
-                        ..
-                    } = event
-                    {
-                        show(
-                            tray.app_handle(),
-                            Some((position.x as i32, position.y as i32)),
-                        );
+                    // On some Windows notification areas a double-click arrives
+                    // as single clicks without a DoubleClick notification.
+                    // Show (never toggle/hide) for both gestures.
+                    let position = match event {
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            position,
+                            ..
+                        }
+                        | TrayIconEvent::DoubleClick {
+                            button: MouseButton::Left,
+                            position,
+                            ..
+                        } => Some((position.x as i32, position.y as i32)),
+                        _ => None,
+                    };
+                    if let Some(position) = position {
+                        request_show(tray.app_handle(), Some(position));
                     }
                 })
                 .build(app)?;

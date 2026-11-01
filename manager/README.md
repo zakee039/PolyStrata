@@ -24,6 +24,18 @@ Tauri 2 / Rust + TypeScript tray control panel. Windows 10 / 11. This is a nativ
 - The Overview bottom strip has equal-width **cache hit rate** and **Cloudflare Tunnel** panels. Cache hit rate counts completed requests reusing at least one prompt token divided by the backend's most recent completed requests (up to 500); without requests it displays a dash. Tunnel displays a status lamp, last measured HTTPS round-trip time, Test and Restart buttons. Connection status uses localhost-only cloudflared Prometheus metrics at port 23188 when running.
 - The General Settings tab contains only manager startup behavior and watchdog; no deployment paths or explanatory card. The model/config details remain viewable from the selection dialog.
 
+## v0.1.11 Embedded UI and reliable window restore
+
+- Build production portable executables with **`npm run build -- --no-bundle`** (Tauri CLI). Direct `cargo build --release` alone does not activate Tauri's bundled frontend custom protocol and can result in a `127.0.0.1` connection-refused page.
+- All tray/menu/single-instance show requests are dispatched on Tauri's main event loop; the window is unminimized, shown, and focused after hiding to tray.
+- The paused-model start button fix from v0.1.10 is retained.
+
+## v0.1.10 Manual start and tray visibility fixes
+
+- The Overview start/stop label and click action now share one model-state check. A manually paused model always runs `load_model` when clicking **启动服务**; it can no longer accidentally run unload again. The footer immediately shows a loading message.
+- Left single-click **or** double-click on the tray icon opens and focuses the panel. The tray click's monitor is used for positioning, fixing invisible/off-screen windows with multiple monitors or mixed DPI; minimized windows are restored. Right-click retains the standard menu.
+- Regression tests cover `paused`, `unloaded`, `idle`, `reading`, `generating`, error and external states in `tests/model-state.test.mjs`.
+
 ## v0.1.9 Windows port-release fix
 
 - After the owned API is safely unloaded and its process tree is stopped, Manager waits up to 12 seconds for the old TCP listener to disappear before binding the new model on the same port. This prevents a transient Windows port-in-use error while the old Uvicorn child is still releasing the listener.

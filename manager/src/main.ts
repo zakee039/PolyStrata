@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./style.css";
+import { modelIsLoaded } from "./model-state";
 
 type Prefs={autostart:boolean;auto_load_model:boolean;manual_model_hold:boolean;watchdog:boolean;lan_access:boolean;cf_enabled:boolean;cf_binary:string;cf_hostname:string;config_path:string;project_path:string;port:number};
 type Model={name:string;path:string;model:string;context:number|null;quantization:string|null;engine:string|null;tokenizer:string|null;draft_model:string|null;vision_projector:string|null;kv_type:string|null;vram_reserve_mib:number|null;idle_unload_s:number|null;conversation_cache_mib:string|null};
@@ -24,7 +25,7 @@ function badge(){const [s,c]=phases[status?.phase||"stopped"]||["异常","bad"];
 function render(){
  root.innerHTML=`<header class="head"><div class="brand"><div class="brand-symbol"><b>P</b></div><div><h1>PolyStrata</h1><small>LOCAL MODEL MANAGER</small></div></div><span id="phase">${badge()}</span></header>
  <nav class="tabs">${Object.keys(names).map(t=>`<button class="tab ${tab===t?"selected":""}" data-tab="${t}">${names[t]}</button>`).join("")}</nav>
- <main id="content"></main><footer><span id="notice">${esc(toast||"本机服务管理 · Windows")}</span><span>v0.1.9</span></footer>`;
+ <main id="content"></main><footer><span id="notice">${esc(toast||"本机服务管理 · Windows")}</span><span>v0.1.11</span></footer>`;
  document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(b=>b.onclick=()=>{tab=b.dataset.tab!;render();});
  content();
 }
@@ -32,7 +33,7 @@ function metric(title:string,val:string,unit:string,sub:string){return `<div cla
 function overview(){
  const m=status?.metrics, t=m?.totals||{}, hw=m?.hardware||status?.host_gpu||{}, r=m?.requests?.[0];
  const live=m?.live||{}, owned=!!status?.managed, phase=status?.phase||"stopped";
- const modelLoaded=owned&&!["unloaded","paused","stopped","starting","stopping","error","external"].includes(phase);
+ const modelLoaded=modelIsLoaded(owned,phase);
  const cache=m?.conversation_cache, checked=cache?.requests||0, hits=cache?.requests_reused||0;
  const hitPct=checked>0?Math.min(100,Math.max(0,100*hits/checked)):0;
  const prefill=live.state==="reading"?live.prefill_tok_s_mean:(r?.prompt_ms?((r.prompt_tokens||0)-(r.reused||0))*1000/r.prompt_ms:null);
@@ -131,7 +132,7 @@ function content(){
  }
  document.getElementById("btn-service")?.addEventListener("click",()=>{
   const phase=status?.phase||"stopped";
-  const loaded=Boolean(status?.managed&&!["unloaded","stopped","starting","stopping","error","external"].includes(phase));
+  const loaded=modelIsLoaded(Boolean(status?.managed),phase);
   void action(loaded?"unload_model":"load_model",loaded?"模型已卸载，API 保持在线":"模型已加载");
  });
  document.getElementById("btn-chat")?.addEventListener("click",()=>void invoke("open_chat").catch(e=>mark(String(e))));
@@ -191,7 +192,7 @@ function content(){
  });
 }
 async function save(v:Prefs){try{prefs=await invoke<Prefs>("save_settings",{incoming:v});mark("设置已保存");await refreshModels();await poll();content();}catch(e){mark("保存失败："+String(e));content();}}
-async function action(name:string,done:string){if(busy)return;busy=true;content();try{await invoke(name);mark(done);}catch(e){mark("操作失败："+String(e));}finally{busy=false;await poll();content();}}
+async function action(name:string,done:string){if(busy)return;busy=true;mark(name==="load_model"?"正在加载模型，请查看状态（首次加载可能较慢）":name==="unload_model"?"正在卸载模型…":"正在执行操作…");content();try{await invoke(name);mark(done);}catch(e){mark("操作失败："+String(e));}finally{busy=false;await poll();content();}}
 async function refreshModels(){try{models=await invoke<Model[]>("list_models");}catch(e){console.warn(e);}}
 async function poll(){try{status=await invoke<Status>("get_status");if(!prefs)prefs=status.settings;
  const el=document.getElementById("phase");if(el)el.innerHTML=badge();
