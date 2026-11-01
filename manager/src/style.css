@@ -110,19 +110,32 @@
 
 .config-switch-error{color:#b44141;font-size:12px;margin:10px 0 0;line-height:1.5;overflow-wrap:anywhere}
 
-/* Overview: data first, no repeated helper captions. */
-.model-card{padding-bottom:10px}
-.model-card .current-config-meta{margin-bottom:0}
-.model-card p{margin-top:7px}
-.metrics .metric{display:flex;flex-direction:column;justify-content:space-between;gap:7px;min-height:84px;padding:10px 13px 11px}
-.metrics .metric>.figure{margin-top:auto;align-self:flex-end;text-align:right;line-height:1.2}
-.metrics .metric>.figure small{margin-left:5px}
-.token-split{display:grid;grid-template-columns:minmax(0,1fr) 1px minmax(0,1fr);align-items:center;gap:6px;margin-top:auto}
-.token-half{display:flex;flex-direction:column;align-items:center;gap:3px;min-width:0;font-variant-numeric:tabular-nums}
-.token-half strong{font-size:21px;line-height:1.1;font-weight:700;letter-spacing:-.5px;max-width:100%;overflow:hidden;text-overflow:ellipsis}
-.token-half span{font-size:10px;color:#8da2a3}
-.token-divider{display:block;width:1px;height:30px;background:#ccded9}
-.monitor-bottom{margin-bottom:6px}
-.monitor-bottom .half-card{min-height:102px}
-.monitor-bottom .track{margin:15px 0 9px}
-.tunnel-monitor-latency{margin:9px 0 6px}
+/* Overview: balanced 2×2 dashboard, all primary figures centered vertically. */
+.head{height:70px}
+.tabs{margin-bottom:8px}
+#content{padding-bottom:6px}
+.overview-page .model-card{padding:10px 15px 8px;margin-bottom:7px}
+.overview-page .model-head{color:#37575a}
+.overview-page .model-card h2{margin:5px 0 0}
+.overview-page .current-config-meta{margin:5px 0 0}
+.overview-page .model-card p{margin:6px 0 0}
+.overview-page .metrics{gap:7px;margin-bottom:7px}
+.overview-page .metric{position:relative;height:87px;min-height:87px;padding:10px 12px}
+.overview-page .hint-label{color:#315256;font-size:11.5px;font-weight:650}
+.overview-page .metric>.figure{position:absolute;top:50%;right:12px;transform:translateY(-50%);font-size:31px;font-weight:750;line-height:1.05;text-align:right}
+.overview-page .metric>.figure em{font-size:13px;font-weight:500}
+.overview-page .metric>.figure small{margin-left:4px;font-size:10px}
+.overview-page .token-split{position:absolute;left:9px;right:9px;top:30px;bottom:10px;display:grid;grid-template-columns:minmax(0,1fr) 1px minmax(0,1fr);align-items:center;gap:5px}
+.overview-page .token-half{display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0;font-variant-numeric:tabular-nums}
+.overview-page .token-half strong{font-size:25px;line-height:1;font-weight:750;letter-spacing:-.4px;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.overview-page .token-half span{font-size:10px;color:#587477}
+.overview-page .token-divider{display:block;width:1px;height:34px;background:#cbdbd7}
+.overview-page .monitor-bottom{margin-bottom:7px}
+.overview-page .monitor-bottom .half-card{min-height:93px}
+.overview-page .monitor-bottom .cache{padding:10px 13px 8px}
+.overview-page .monitor-bottom .track{margin:13px 0 8px}
+.overview-page .tunnel-monitor{padding:9px 12px 8px}
+.overview-page .tunnel-monitor-latency{margin:8px 0 5px}
+.overview-page .actions button{height:39px}
+.overview-page .subactions{margin-top:3px}
+.overview-page .subactions button{padding:4px 3px}

@@ -42,16 +42,16 @@ function overview(){
  const selected=activeConfig(), model=selected?.name|| (typeof m?.engine?.model==="string"?m.engine.model:"未找到当前配置");
  const shownModel=String(model).startsWith("G4-MeroMero-26B-A4B")?"G4-MeroMero 26B · "+(selected?.quantization||"Q4_K_M"):String(model);
  const currentFile=label(prefs?.config_path||"");
- const modelHint=phase==="error"?(status?.error||"API 启动失败，请查看日志"):phase==="external"?"API 被其他进程占用":phase==="paused"?"模型已手动停止 · 等待主动加载":phase==="unloaded"?"15 分钟空闲卸载 · 请求可自动唤醒":"";
- return `<section><div class="model-card"><div class="model-head"><span>当前配置文件</span><div class="config-head-actions"><button id="choose-config" class="chip chip-action">选择配置文件 ▾</button><button class="chip chip-action" id="home-config-detail" ${selected?'':'disabled'}>查看</button></div></div>
+ const modelHint=phase==="error"?(status?.error||"API 启动失败，请查看日志"):phase==="external"?"API 被其他进程占用":"";
+ return `<section class="overview-page"><div class="model-card"><div class="model-head"><span>当前配置文件</span><div class="config-head-actions"><button id="choose-config" class="chip chip-action">选择配置文件 ▾</button><button class="chip chip-action" id="home-config-detail" ${selected?'':'disabled'}>查看</button></div></div>
    <h2 title="${esc(model)}">${esc(shownModel)}</h2>
    <div class="current-config-meta"><span title="${esc(prefs?.config_path)}">${esc(currentFile)}</span><span>${selected?.context?esc(ctxText(selected.context)):"上下文未指定"}</span></div>
    ${modelHint?`<p>${esc(modelHint)}</p>`:""}</div>
  <div class="metrics">
  ${metric("GPU 显存",gb(hw.gpu_mem_used)+" <em>/ "+gb(hw.gpu_mem_total)+"</em>","GB")}
- ${metric("Decode",fmt(decode,1),"tok/s")}
- ${metric("Prefill",fmt(prefill),"tok/s")}
  ${tokenMetric(m?short(t.prompt_tokens||0):"—",m?short(t.output_tokens||0):"—")}
+ ${metric("Prefill",fmt(prefill),"tok/s")}
+ ${metric("Decode",fmt(decode,1),"tok/s")}
  </div>
  <div class="monitor-bottom">
  <div class="cache half-card" title="最近最多 500 次请求中复用 KV 的请求占比">
