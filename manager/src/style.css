@@ -109,3 +109,20 @@
 .api-compact .api-line .key-display{flex:1 1 0;min-width:0;font:10px/1.3 Consolas,monospace;color:#557a7a;padding:7px 8px}
 
 .config-switch-error{color:#b44141;font-size:12px;margin:10px 0 0;line-height:1.5;overflow-wrap:anywhere}
+
+/* Overview: data first, no repeated helper captions. */
+.model-card{padding-bottom:10px}
+.model-card .current-config-meta{margin-bottom:0}
+.model-card p{margin-top:7px}
+.metrics .metric{display:flex;flex-direction:column;justify-content:space-between;gap:7px;min-height:84px;padding:10px 13px 11px}
+.metrics .metric>.figure{margin-top:auto;align-self:flex-end;text-align:right;line-height:1.2}
+.metrics .metric>.figure small{margin-left:5px}
+.token-split{display:grid;grid-template-columns:minmax(0,1fr) 1px minmax(0,1fr);align-items:center;gap:6px;margin-top:auto}
+.token-half{display:flex;flex-direction:column;align-items:center;gap:3px;min-width:0;font-variant-numeric:tabular-nums}
+.token-half strong{font-size:21px;line-height:1.1;font-weight:700;letter-spacing:-.5px;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.token-half span{font-size:10px;color:#8da2a3}
+.token-divider{display:block;width:1px;height:30px;background:#ccded9}
+.monitor-bottom{margin-bottom:6px}
+.monitor-bottom .half-card{min-height:102px}
+.monitor-bottom .track{margin:15px 0 9px}
+.tunnel-monitor-latency{margin:9px 0 6px}
