@@ -950,9 +950,13 @@ function answerHtml(m) {
     html += toolHtml(t, k);
     if (t.image_file && /^[a-f0-9]{32}\.png$/.test(t.image_file)) {
       const path = "v1/images/files/" + t.image_file;
+      const original = t.image_original_file && /^[a-f0-9]{32}\.png$/.test(t.image_original_file)
+        ? "v1/images/files/" + t.image_original_file : "";
       html += `<figure class="st-generated-image"><a href="${path}" target="_blank" rel="noopener noreferrer">` +
               `<img src="${path}" alt="${esc(t.image_prompt || "Generated image")}" loading="lazy"></a>` +
-              `<figcaption>Generated image</figcaption></figure>`;
+              `<figcaption>${t.upscale_applied ? "Anime 4× · " : ""}Generated image` +
+              (original ? ` · <a href="${original}" target="_blank" rel="noopener noreferrer">Original 768px</a>` : "") +
+              (t.upscale_fallback ? " · Upscale failed; showing original" : "") + `</figcaption></figure>`;
     }
   });
   return html + markdown(m.text.slice(pos));
@@ -968,7 +972,12 @@ function onTool(m, x) {
   } else if (x.event === "result") {
     Object.assign(t, {result: x.text, ok: x.ok, chars: x.chars, truncated: x.truncated, ms: x.ms,
                       state: x.skipped ? "skipped" : x.ok ? "done" : "error"});
-    if (x.image_file) { t.image_file = x.image_file; t.image_prompt = x.image_prompt || ""; }
+    if (x.image_file) {
+      t.image_file = x.image_file; t.image_prompt = x.image_prompt || "";
+      t.image_original_file = x.image_original_file || "";
+      t.upscale_applied = x.upscale_applied === true;
+      t.upscale_fallback = x.upscale_fallback === true;
+    }
   }
 }
 function updateAssistant(el, m, streaming) {
@@ -1362,7 +1371,8 @@ $("img-form").onsubmit = async (ev) => {
   ev.preventDefault();
   const prompt = $("img-prompt").value.trim();
   if (!prompt) return;
-  const body = {prompt, size: $("img-size").value, response_format: "b64_json"};
+  const body = {prompt, size: $("img-size").value, response_format: "b64_json",
+                strata_upscale: $("img-upscale").value};
   if ($("img-seed").value !== "") body.seed = Number($("img-seed").value);
   $("img-go").disabled = true;
   const t0 = performance.now();
@@ -1377,7 +1387,18 @@ $("img-form").onsubmit = async (ev) => {
       img.src = "data:image/png;base64," + d.b64_json;
       img.alt = prompt;
       const cap = document.createElement("figcaption");
-      cap.textContent = `${j.size}, seed ${d.seed}, ${((performance.now() - t0) / 1000).toFixed(0)} s: ${prompt}`;
+      const up = j.strata || {};
+      cap.textContent = `${j.size}, seed ${d.seed}, ${((performance.now() - t0) / 1000).toFixed(0)} s` +
+                        (up.upscale_applied ? " · Anime 4×" : "") +
+                        (up.upscale_fallback ? " · Upscale failed; original used" : "") + `: ${prompt}`;
+      const originalFile = (up.upscale_original_files || [])[0];
+      if (originalFile && /^[a-f0-9]{32}\.png$/.test(originalFile)) {
+        const link = document.createElement("a");
+        link.href = "v1/images/files/" + originalFile;
+        link.textContent = " · Original image";
+        link.target = "_blank"; link.rel = "noopener noreferrer";
+        cap.append(link);
+      }
       fig.append(img, cap);
       $("img-results").prepend(fig);
     }

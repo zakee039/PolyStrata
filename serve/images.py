@@ -105,7 +105,19 @@ def parse_request(req: dict, cfg: dict) -> dict:
     seed = _int_field(req, "seed", 0, 2**62, None)
     if seed is None:
         seed = random.SystemRandom().randrange(0, 2**31)
-    return {"prompt": prompt, "width": w, "height": h, "n": n, "steps": steps, "seed": seed, "response_format": fmt}
+    from serve.upscale import options
+    upscale, style_hint = options(req)
+    return {"prompt": prompt, "width": w, "height": h, "n": n, "steps": steps, "seed": seed,
+            "response_format": fmt, "upscale": upscale, "style_hint": style_hint}
+
+
+def postprocess(gen, images: list[bytes], job: dict, cancel: threading.Event | None = None):
+    """Serial postprocess inside gpu_turn, before eager-reloading the text LLM.
+
+    The feature is opt-in. Failures retain the original PNGs.
+    """
+    from serve.upscale import apply
+    return apply(gen, images, job, cancel)
 
 
 def sd_cli_args(cfg: dict, job: dict, out_pattern: str) -> list[str]:
@@ -313,7 +325,9 @@ class ImageGen:
                 item["b64_json"] = base64.b64encode(png).decode("ascii")
             data.append(item)
         return {"created": int(time.time()), "data": data, "model": self.model,
-                "output_format": "png", "size": f"{job['width']}x{job['height']}", "strata": figures}
+                "output_format": "png",
+                "size": figures.get("upscale_output_size") or f"{job['width']}x{job['height']}",
+                "strata": figures}
 
     def status(self) -> dict:
         out = {"enabled": True, "model": self.model, "backend": self.cfg.get("backend"),

@@ -42,11 +42,10 @@ time of sd.cpp's default half overlap.
 
 ## Use it
 
-> **Approved follow-up design (not yet implemented):**
-> [768px defaults, optional Anime 4× super-resolution, strict serial GPU
-> scheduling and Gemma/KV restoration](IMAGE_PIPELINE_DECISION.md).
-> The existing defaults and image pipeline described below remain live until
-> that design is implemented and tested.
+> **Implemented (opt-in per deployment):**
+> [768px first-party defaults, automatic Anime 4×, strict serial GPU
+> scheduling and KV/LLM restoration](IMAGE_PIPELINE_DECISION.md).
+> The generic OpenAI Images API's omitted-size default remains 1024px.
 
 ### Generate an image inside a chat
 
@@ -67,10 +66,43 @@ the KV session fails, subsequent turns can rebuild their context from the
 chat history. The PNG is kept by the existing `/v1/images/files/` route,
 using a random, unguessable file name; the name acts as its access token.
 
-The built-in tool defaults to 512×512 and can select 768×768 or 1024×1024.
+The built-in tool defaults to 768×768 and can select 512×512 or 1024×1024.
 The image backend must be configured separately for each server deployment;
 it is not tied to a particular text model. If image generation is not
 configured, the regular chat and external MCP tools behave as before.
+
+### Anime 4× post-processing (optional)
+
+The first-party Chat tool and Images page use 768×768 by default and send
+`strata_upscale: "auto"`. Explicit modes are `auto`, `off` and `4x`; the
+optional `strata_style_hint` accepts `auto`, `anime` or `other`.
+Anime-themed prompts (动漫、二次元、anime、manga、Miku/初音、立绘) are upscaled
+by `realesrgan-x4plus-anime` to 3072×3072. Generic illustration, photo,
+watercolor and pixel art are not automatically treated as anime.
+
+Enable the feature per deployment with an `images.upscaler` section:
+
+    "upscaler": {
+      "enabled": true,
+      "exe": "PATH_TO/realesrgan-ncnn-vulkan.exe",
+      "model_dir": "PATH_TO/models",
+      "model": "realesrgan-x4plus-anime",
+      "tile": 128, "gpu": 1, "timeout_s": 180,
+      "max_output_side": 3072
+    }
+
+The `gpu` value is the ncnn-Vulkan device index, not necessarily a CUDA
+index. The source PNG is kept for viewing. If the requested 4× output
+exceeds the size limit, automatic upscale is skipped. If upscale crashes,
+times out or runs out of resources, the original PNG is returned. The
+server runs Qwen-Image, waits for sd-cli to exit, runs Real-ESRGAN, waits
+for it to exit, and only then eagerly reloads the text model and KV state.
+
+The response's `strata` metadata reports `upscale_applied`,
+`upscale_seconds`, `upscale_reason`, `upscale_original_files` and a
+failure flag where appropriate. Third-party API calls remain unchanged:
+when `size` is omitted they still default to 1024×1024, and no 4× is
+applied unless `strata_upscale` is explicitly requested.
 
     curl http://127.0.0.1:8080/v1/images/generations -H "Content-Type: application/json" \
       -d '{"prompt": "a cartoon sloth mascot waving, flat vector illustration", "size": "1024x1024", "seed": 42}'

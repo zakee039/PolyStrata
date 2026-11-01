@@ -19,13 +19,19 @@ SCHEMA = {
                     "create or visualize something. This tool cannot edit an uploaded "
                     "picture. Do not use it for ordinary questions. The "
                     "result is inserted automatically into the chat by PolyStrata. "
-                    "Write a detailed visual prompt, not a conversation reply."),
+                    "Write a detailed visual prompt, not a conversation reply. "
+                    "Use 768x768 by default. Respect the user's request to disable "
+                    "upscaling, and identify anime styles with style_hint=anime."),
     "parameters": {
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "The scene or picture to generate."},
             "size": {"type": "string", "enum": ["512x512", "768x768", "1024x1024"],
-                     "description": "Default 512x512. Larger sizes use more resources."},
+                     "description": "Default 768x768. Larger sizes use more resources."},
+            "upscale": {"type": "string", "enum": ["auto", "off", "4x"],
+                        "description": "Default auto. Anime pictures get 4x upscaling; off disables it."},
+            "style_hint": {"type": "string", "enum": ["auto", "anime", "other"],
+                           "description": "Anime only when clearly an anime/2D Japanese animation style."},
         },
         "required": ["prompt"],
     },
@@ -69,8 +75,10 @@ class ChatImageHub:
             if not isinstance(arguments, dict):
                 raise ValueError("expected image arguments as an object")
             job = images_api.parse_request({
-                "prompt": arguments.get("prompt"), "size": arguments.get("size") or "512x512",
+                "prompt": arguments.get("prompt"), "size": arguments.get("size") or "768x768",
                 "n": 1, "response_format": "url",
+                "strata_upscale": arguments.get("upscale") or "auto",
+                "strata_style_hint": arguments.get("style_hint") or "auto",
             }, self.svc.images.cfg)
             if cancel and cancel.is_set():
                 raise RuntimeError("image generation cancelled")
@@ -81,13 +89,24 @@ class ChatImageHub:
                 gen.keep_files = 2**31 - 1
             with images_api.gpu_turn(self.svc, gen, job, cancel) as policy:
                 images, figures = gen.run(job, cancel)
+                images, up = images_api.postprocess(gen, images, job, cancel)
+                figures.update(up)
             filename = gen.store(images[0])
             output["image_file"] = filename
             output["image_prompt"] = job["prompt"]
+            if figures.get("upscale_original_files"):
+                output["image_original_file"] = figures["upscale_original_files"][0]
+            output["upscale_applied"] = figures.get("upscale_applied", False)
+            output["upscale_reason"] = figures.get("upscale_reason", "")
+            if figures.get("upscale_fallback"):
+                output["upscale_fallback"] = True
             output["text"] = (f"Generated the requested image successfully "
-                              f"(size {job['width']}x{job['height']}, seed {job['seed']}, "
+                              f"(size {figures.get('upscale_output_size') or str(job['width'])+'x'+str(job['height'])}, "
+                              f"seed {job['seed']}, "
                               f"GPU policy {policy}). The image is already displayed "
-                              "in this conversation; do not generate it again.")
+                              "in this conversation; do not generate it again."
+                              + (" Anime 4x upscale failed; showing the original picture."
+                                 if figures.get("upscale_fallback") else ""))
             output["ok"] = True
         except Exception as exc:
             output["ok"] = False

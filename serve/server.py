@@ -5468,7 +5468,10 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
                   f"{r['ms'] / 1000:.1f} s{' (truncated for the model)' if r['truncated'] else ''}", flush=True)
             results.append(r["text"])
             yield "mcp", {"event": "result", "id": c.id, **{k: r[k] for k in ("ok", "text", "chars", "truncated", "ms")},
-                          **({"image_file": r["image_file"], "image_prompt": r.get("image_prompt", "")}
+                          **({"image_file": r["image_file"], "image_prompt": r.get("image_prompt", ""),
+                              "image_original_file": r.get("image_original_file"),
+                              "upscale_applied": r.get("upscale_applied", False),
+                              "upscale_fallback": r.get("upscale_fallback", False)}
                              if r.get("image_file") else {})}
         if cancel.is_set() or len(results) < len(calls):
             done = {**done, "finish": "cancel"}
@@ -6478,6 +6481,9 @@ def make_handler(svc: Service):
             try:
                 with images_api.gpu_turn(svc, gen, job, cancel) as policy:
                     images, figures = gen.run(job, cancel)
+                    images, up = images_api.postprocess(gen, images, job, cancel)
+                    if gen.cfg.get("upscaler", {}).get("enabled"):
+                        figures.update(up)
             except images_api.ImageJobFailed as e:
                 self._json(500, {"error": {"type": "server_error", "code": "image_generation_failed",
                                            "message": str(e)}})

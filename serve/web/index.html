@@ -92,8 +92,14 @@
         <div class="img-row">
           <label class="st-field">Size
             <select class="st-input" id="img-size">
-              <option>1024x1024</option><option>1536x1024</option><option>1024x1536</option>
-              <option>768x768</option><option>512x512</option></select></label>
+              <option selected>768x768</option><option>1024x1024</option>
+              <option>1536x1024</option><option>1024x1536</option><option>512x512</option></select></label>
+          <label class="st-field">Upscale
+            <select class="st-input" id="img-upscale">
+              <option value="auto" selected>Auto (Anime 4×)</option>
+              <option value="off">Off</option>
+              <option value="4x">4×</option>
+            </select></label>
           <label class="st-field">Seed
             <input class="st-input" id="img-seed" type="number" min="0" placeholder="random"></label>
           <button type="submit" class="st-btn st-btn--primary" id="img-go">Generate</button>
