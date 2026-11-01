@@ -161,6 +161,22 @@ fn port_open(port: u16) -> bool {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     TcpStream::connect_timeout(&addr, Duration::from_millis(240)).is_ok()
 }
+// taskkill /T waits for the Python parent but Windows may leave the child
+// listener alive briefly. A new config cannot bind until the old listener
+// has actually gone away. Never kill an unknown process on this port.
+fn wait_for_port_release(port: u16, timeout: Duration) -> Result<(), String> {
+    let started = Instant::now();
+    while port_open(port) {
+        if started.elapsed() >= timeout {
+            return Err(format!(
+                "端口 {port} 在安全卸载后仍未释放（等待 {} 秒）。请检查端口占用进程。",
+                timeout.as_secs()
+            ));
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+    Ok(())
+}
 fn api_get(port: u16, path: &str) -> Result<Value, String> {
     let key = security::ensure_api_key()?;
     ureq::get(&format!("http://127.0.0.1:{port}{path}"))
@@ -469,7 +485,10 @@ fn stop_backend(state: &AppState) -> Result<(), String> {
             ));
         }
         let _ = child.wait();
-        Ok(())
+        // A successful process-tree kill is not necessarily the instant the
+        // Uvicorn subprocess releases its TCP listener on Windows. This also
+        // protects a same-port config switch from an intermittent false error.
+        wait_for_port_release(port, Duration::from_secs(12))
     })();
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     inner.stopping = false;
@@ -975,7 +994,10 @@ fn config_arg<'a>(info: &'a Value, flag: &str) -> Option<&'a str> {
 
 fn model_config_from_json(path: &Path, info: &Value) -> Option<ModelConfig> {
     let engine = info["exe"].as_str()?.to_string();
-    let model = config_arg(info, "--model").unwrap_or_default().to_string();
+    let model = config_arg(info, "--model")
+        .or_else(|| config_arg(info, "--native"))
+        .unwrap_or_default()
+        .to_string();
     let name = info["display_name"]
         .as_str()
         .or_else(|| info["model_name"].as_str())
@@ -986,7 +1008,10 @@ fn model_config_from_json(path: &Path, info: &Value) -> Option<ModelConfig> {
     let quantization = Path::new(&model)
         .file_stem()
         .and_then(|s| s.to_str())
-        .and_then(|s| s.rsplit_once("-Q").map(|(_, quant)| format!("Q{quant}")));
+        .and_then(|s| s.rsplit_once("-Q").map(|(_, quant)| {
+            // Multi-shard GGUFs end with "-00001-of-00002"; keep only the quant.
+            format!("Q{}", quant.split("-00001-").next().unwrap_or(quant))
+        }));
     Some(ModelConfig {
         name,
         path: path.to_string_lossy().to_string(),

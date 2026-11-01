@@ -4089,7 +4089,8 @@ class Service:
                 return [os.path.abspath(file), st.st_size, st.st_mtime_ns]
             except OSError:
                 return [str(file)]
-        model_file = next((args[i + 1] for i, v in enumerate(args[:-1]) if v == "--model"), "")
+        model_file = next((args[i + 1] for i, v in enumerate(args[:-1])
+                           if v in ("--model", "--native")), "")
         args = [args, identity(exe), identity(model_file)]
         return hashlib.sha256(json.dumps([self.model, args], default=str).encode()).hexdigest()
 
@@ -4099,7 +4100,9 @@ class Service:
             return
         ident = v1.active_id
         try:
-            result = self.engine.session_file("save", str(v1.snapshot_path(ident)))
+            target = v1.snapshot_path(ident, self._v1_model_key())
+            target.parent.mkdir(parents=True, exist_ok=True)
+            result = self.engine.session_file("save", str(target))
             v1.registered_snapshot(ident, self._v1_model_key(), result["tokens"])
             v1.active_dirty = False
             print(f"[strata] V1 saved KV: {ident}, {result['tokens']} tokens in {result['ms']:.0f} ms", flush=True)
@@ -4132,7 +4135,7 @@ class Service:
             print(f"[strata] V1 restored KV: {ident}, {r['tokens']} tokens in {r['ms']:.0f} ms", flush=True)
         except Exception as e:
             print(f"[strata] V1 KV restore failed ({ident}): {e}; discarding snapshot", flush=True)
-            v1.abandon_snapshot(ident)
+            v1.abandon_snapshot(ident, self._v1_model_key())
             if not self.loaded():
                 self.ensure_loaded()
 
@@ -6077,10 +6080,10 @@ def make_handler(svc: Service):
                     self._json(404, {"error": {"message": "V1 sessions disabled"}})
                     return
                 if path == "/v1/strata/sessions":
-                    self._json(200, {"sessions": svc.session_v1.list()})
+                    self._json(200, {"sessions": svc.session_v1.list(svc._v1_model_key())})
                     return
                 try:
-                    item = svc.session_v1.get(path[len("/v1/strata/sessions/"):])
+                    item = svc.session_v1.get(path[len("/v1/strata/sessions/"):], svc._v1_model_key())
                     self._json(200 if item else 404, item if item else
                                {"error": {"message": "session not found"}})
                 except ValueError as e:
@@ -6177,6 +6180,25 @@ def make_handler(svc: Service):
             else:
                 self._json(404, {"error": {"message": "not found"}})
 
+        def do_DELETE(self):
+            if not self._authorized():
+                return
+            path = self.path.split("?")[0].rstrip("/")
+            if path.startswith("/v1/") and self._foreign_page():
+                return
+            if not path.startswith("/v1/strata/sessions/") or not svc.session_v1:
+                self._json(404, {"error": {"message": "not found"}})
+                return
+            if not self._own_page("local conversation can be deleted"):
+                return
+            try:
+                from serve.session_v1 import valid_id
+                ident = valid_id(path[len("/v1/strata/sessions/"):])
+                svc.session_v1.delete(ident)
+                self._json(200, {"id": ident, "deleted": True})
+            except ValueError as e:
+                self._json(400, {"error": {"message": str(e)}})
+
         def do_POST(self):
             try:
                 self._post()
@@ -6240,6 +6262,35 @@ def make_handler(svc: Service):
                         raise ValueError("web_messages array required")
                     svc.session_v1.store_web(ident, req["web_messages"])
                     self._json(200, {"id": ident, "saved": True})
+                    return
+                if path.startswith("/v1/strata/sessions/"):
+                    if not svc.session_v1:
+                        self._json(404, {"error": {"message": "sessions disabled"}})
+                        return
+                    if not self._own_page("local conversations can be edited"):
+                        return
+                    from serve.session_v1 import valid_id
+                    ident = valid_id(path[len("/v1/strata/sessions/"):])
+                    action = req.get("action")
+                    try:
+                        if action == "rename":
+                            svc.session_v1.rename(ident, req.get("title"))
+                        elif action == "pin":
+                            svc.session_v1.pin(ident, req.get("pinned"))
+                        elif action == "lock_kv":
+                            model = svc._v1_model_key()
+                            # Do not SAVE from this HTTP handler: the engine FIFO owns
+                            # that operation and persists pending locks at its next
+                            # safe session switch or model unload.
+                            item = svc.session_v1.lock_snapshot(ident, model, req.get("locked"))
+                            self._json(200, item)
+                            return
+                        else:
+                            raise ValueError("unknown session action")
+                    except KeyError:
+                        self._json(404, {"error": {"message": "session not found"}})
+                        return
+                    self._json(200, svc.session_v1.get(ident, svc._v1_model_key()))
                     return
                 if path.startswith("/v1/responses/"):        # retrieve/delete/cancel/compact: nothing is stored
                     self._json(404, responses_error_body("this server keeps no responses (stateless); send the "

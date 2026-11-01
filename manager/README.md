@@ -24,6 +24,19 @@ Tauri 2 / Rust + TypeScript tray control panel. Windows 10 / 11. This is a nativ
 - The Overview bottom strip has equal-width **cache hit rate** and **Cloudflare Tunnel** panels. Cache hit rate counts completed requests reusing at least one prompt token divided by the backend's most recent completed requests (up to 500); without requests it displays a dash. Tunnel displays a status lamp, last measured HTTPS round-trip time, Test and Restart buttons. Connection status uses localhost-only cloudflared Prometheus metrics at port 23188 when running.
 - The General Settings tab contains only manager startup behavior and watchdog; no deployment paths or explanatory card. The model/config details remain viewable from the selection dialog.
 
+## v0.1.9 Windows port-release fix
+
+- After the owned API is safely unloaded and its process tree is stopped, Manager waits up to 12 seconds for the old TCP listener to disappear before binding the new model on the same port. This prevents a transient Windows port-in-use error while the old Uvicorn child is still releasing the listener.
+- If a switch operation still reports an error, the picker re-reads persisted settings to avoid showing the old model as active after the new config was already saved. It distinguishes a saved config with a not-yet-ready API from an unchanged selection.
+- Verified on the running Windows manager using real WebView2 UIAutomation: Swift Flash → Gemma 4 → Swift Flash, each returned a healthy API at 18081 with the requested model and weights unloaded. No port errors or driver changes.
+
+## v0.1.8 config switching fix
+
+- The API is resident while Manager is open, so an owned/running API must not disable the **使用** action for another registered model. Only the current selection, an in-progress switch, transitional start/stop, or an external/unowned API blocks switching.
+- Switching uses the existing backend safe unload/KV preservation, persists the newly selected JSON, and automatically restarts the API. Manual model load remains a separate action.
+- The picker prevents duplicate switch requests and displays switch errors in the dialog.
+- Verified in the real Windows WebView2 UI by accessibility inspection: Gemma **使用中** disabled and Swift Flash **使用** enabled while port 18081 is managed and unloaded.
+
 ## Development
 
 ```powershell

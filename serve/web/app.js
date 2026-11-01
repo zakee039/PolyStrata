@@ -95,7 +95,7 @@ function headers(json = false) {
   return h;
 }
 $("api-key").value = store.get("apikey", "");
-$("api-key").onchange = () => { store.set("apikey", $("api-key").value.trim()); toast("success", "API key saved", "Kept in this browser only."); };
+$("api-key").onchange = () => { store.set("apikey", $("api-key").value.trim()); toast("success", "API key saved", "Kept in this browser only."); enableServerSessions(); };
 
 let health = {model: "strata", images: false, max_context: 0};
 async function loadHealth() {
@@ -635,7 +635,8 @@ async function refreshSessionPicker() {
     picker.add(option);
   }
   if (current) picker.value = current;
-  picker.hidden = false;
+  picker.hidden = true;
+  renderHistorySidebar(list);
   return list;
 }
 async function loadServerChat(id) {
@@ -656,15 +657,17 @@ async function loadServerChat(id) {
 async function enableServerSessions() {
   try {
     const r = await fetch("v1/strata/sessions", {headers: headers()});
+    if (r.status === 401) { toast("warn", "History needs API key", "Enter the local API key under Settings to access saved conversations.", 6500); return; }
     if (!r.ok) return;
     sessionV1 = true;
     const list = (await r.json()).sessions || [];
+    $("session-sidebar").hidden = false;
     // Old browser chats deliberately aren't migrated; only server records are authoritative.
     if (sessionId && list.some((s) => s.id === sessionId)) {
       await loadServerChat(sessionId);
     } else if (!messages.length && list.length) {
       await loadServerChat(list[0].id);
-    } else if (!sessionId) {
+    } else if (!list.length || !sessionId) {
       sessionId = makeSessionId();
       store.set("session-id", sessionId);
     }

@@ -24,7 +24,7 @@ function badge(){const [s,c]=phases[status?.phase||"stopped"]||["异常","bad"];
 function render(){
  root.innerHTML=`<header class="head"><div class="brand"><div class="brand-symbol"><b>P</b></div><div><h1>PolyStrata</h1><small>LOCAL MODEL MANAGER</small></div></div><span id="phase">${badge()}</span></header>
  <nav class="tabs">${Object.keys(names).map(t=>`<button class="tab ${tab===t?"selected":""}" data-tab="${t}">${names[t]}</button>`).join("")}</nav>
- <main id="content"></main><footer><span id="notice">${esc(toast||"本机服务管理 · Windows")}</span><span>v0.1.7</span></footer>`;
+ <main id="content"></main><footer><span id="notice">${esc(toast||"本机服务管理 · Windows")}</span><span>v0.1.9</span></footer>`;
  document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(b=>b.onclick=()=>{tab=b.dataset.tab!;render();});
  content();
 }
@@ -77,11 +77,11 @@ function modelPage(){
    </div>
    <div class="config-actions">
     <button class="view-config" data-view-config="${esc(encodeURIComponent(m.path))}">查看</button>
-    <button class="choice ${selected?"active":""}" data-model="${esc(encodeURIComponent(m.path))}" ${selected||status?.managed?"disabled":""}>${selected?"使用中":"使用"}</button>
+    <button class="choice ${selected?"active":""}" data-model="${esc(encodeURIComponent(m.path))}" ${selected||busy||["starting","stopping","external"].includes(status?.phase||"")?"disabled":""}>${selected?"使用中":"使用"}</button>
    </div></div>`;
  }).join("")||'<div class="empty">没有发现有效的部署配置</div>'}</div>
  <div class="config-picker-bottom"><button id="register-config" class="mini-primary">＋ 注册配置文件</button>
- <p class="hint">注册只保存 JSON 文件路径，不复制模型。服务运行时不允许切换正在使用的配置。</p></div>`;
+ <p class="hint">注册只保存 JSON 文件路径，不复制模型。切换配置将安全卸载当前模型并重启 API 服务。</p></div>`;
 }
 function workflowPage(){return `<section><div class="workflow-label">Workflow Prefix Cache</div>
  <div class="placeholder"><div class="placeholder-icon">◇</div><b>工作流功能预留</b><p>Miku Harness 将通过注册接口预计算前缀；后续调用自动复用缓存。当前尚未部署工作流 API。</p>
@@ -219,11 +219,42 @@ async function openConfigPicker(){
   const c=models.find(m=>m.path===decodeURIComponent(b.dataset.viewConfig!));if(c)showConfig(c);
  });
  bg.querySelectorAll<HTMLButtonElement>("[data-model]").forEach(b=>b.onclick=async()=>{
-  if(!prefs)return;
+  if(!prefs||busy)return;
+  const configPath=decodeURIComponent(b.dataset.model!);
+  if(configPath.toLowerCase()===prefs.config_path.toLowerCase())return;
+  busy=true;
+  const buttons=[...bg.querySelectorAll<HTMLButtonElement>("[data-model]")];
+  buttons.forEach(button=>button.disabled=true);
+  b.textContent="切换中…";
   try {
-   prefs=await invoke<Prefs>("save_settings",{incoming:{...prefs,config_path:decodeURIComponent(b.dataset.model!)}});
-   close();await refreshModels();await poll();content();mark("已切换配置文件，下次启动服务将使用所选配置");
-  } catch(e){mark("切换配置失败："+String(e));}
+   prefs=await invoke<Prefs>("save_settings",{incoming:{...prefs,config_path:configPath}});
+   close();await refreshModels();await poll();
+   mark("已切换配置文件，API 已自动重启；点击启动服务可加载模型");
+  } catch(e){
+   const detail=String(e);
+   // A backend restart can finish after an intermediate port-in-use error.
+   // Re-read the persisted selection so the UI never claims the old model
+   // is still selected when the service has switched in the meantime.
+   try {prefs=await invoke<Prefs>("get_settings");await refreshModels();await poll();}catch{}
+   const changed=prefs?.config_path.toLowerCase()===configPath.toLowerCase();
+   const message=changed
+    ?"配置已保存，请检查 API 状态；服务可能仍在重启："+detail
+    :"切换配置失败："+detail;
+   mark(message);
+   if(changed){close();}else{
+    let alert=bg.querySelector<HTMLElement>(".config-switch-error");
+    if(!alert){alert=document.createElement("p");alert.className="config-switch-error";alert.setAttribute("role","alert");bg.querySelector(".config-picker-bottom")?.appendChild(alert);}
+    alert.textContent=message;
+   }
+  } finally {
+   busy=false;
+   buttons.forEach(button=>{
+    const selected=decodeURIComponent(button.dataset.model||"").toLowerCase()===prefs?.config_path.toLowerCase();
+    button.disabled=selected;
+    button.textContent=selected?"使用中":"使用";
+   });
+   content();
+  }
  });
  bg.querySelector("#register-config")?.addEventListener("click",async()=>{
   try{
