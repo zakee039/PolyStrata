@@ -42,6 +42,12 @@ time of sd.cpp's default half overlap.
 
 ## Use it
 
+> **Approved follow-up design (not yet implemented):**
+> [768px defaults, optional Anime 4× super-resolution, strict serial GPU
+> scheduling and Gemma/KV restoration](IMAGE_PIPELINE_DECISION.md).
+> The existing defaults and image pipeline described below remain live until
+> that design is implemented and tested.
+
 ### Generate an image inside a chat
 
 When image generation is enabled in the run config, PolyStrata's own web chat
