@@ -243,3 +243,6 @@ main { flex: 1; min-height: 0; display: flex; }
 .session-none,.session-foot { color:var(--st-ink-muted); font-size:11px; padding:12px 8px; }
 .session-foot { border-top:1px solid var(--st-line); }
 @media(max-width:720px) { .session-sidebar { width:225px; min-width:180px; max-width:48vw; } }
+.st-generated-image { margin: .7rem 0 1rem; max-width: 560px; }
+.st-generated-image img { display: block; max-width: 100%; height: auto; border-radius: 12px; }
+.st-generated-image figcaption { margin-top: .3rem; font-size: .8rem; opacity: .7; }

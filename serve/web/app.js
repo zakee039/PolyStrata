@@ -738,6 +738,7 @@ async function streamInto(m, el, signal) {
   if (settings.max) body.max_tokens = +settings.max;
   if (projectionLoaded()) body.experimental_speed_projection = !!settings.esp;
   if (settings.mcp !== false && mcpInfo.tools > 0) body.strata_mcp = true;
+  if (health.image_generation) body.strata_image_tool = true;
   if (sessionV1 && sessionId) body.strata_session_id = sessionId;
 
   let firstAt = null, thinkStart = null, usage = null, frame = 0;
@@ -947,6 +948,12 @@ function answerHtml(m) {
     if (at > pos) html += markdown(m.text.slice(pos, at));
     pos = at;
     html += toolHtml(t, k);
+    if (t.image_file && /^[a-f0-9]{32}\.png$/.test(t.image_file)) {
+      const path = "v1/images/files/" + t.image_file;
+      html += `<figure class="st-generated-image"><a href="${path}" target="_blank" rel="noopener noreferrer">` +
+              `<img src="${path}" alt="${esc(t.image_prompt || "Generated image")}" loading="lazy"></a>` +
+              `<figcaption>Generated image</figcaption></figure>`;
+    }
   });
   return html + markdown(m.text.slice(pos));
 }
@@ -961,6 +968,7 @@ function onTool(m, x) {
   } else if (x.event === "result") {
     Object.assign(t, {result: x.text, ok: x.ok, chars: x.chars, truncated: x.truncated, ms: x.ms,
                       state: x.skipped ? "skipped" : x.ok ? "done" : "error"});
+    if (x.image_file) { t.image_file = x.image_file; t.image_prompt = x.image_prompt || ""; }
   }
 }
 function updateAssistant(el, m, streaming) {

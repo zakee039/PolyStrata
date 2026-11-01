@@ -5467,7 +5467,9 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
             print(f"[strata] tool {c.name}: {'ok' if r['ok'] else 'error'}, {r['chars']:,} characters in "
                   f"{r['ms'] / 1000:.1f} s{' (truncated for the model)' if r['truncated'] else ''}", flush=True)
             results.append(r["text"])
-            yield "mcp", {"event": "result", "id": c.id, **{k: r[k] for k in ("ok", "text", "chars", "truncated", "ms")}}
+            yield "mcp", {"event": "result", "id": c.id, **{k: r[k] for k in ("ok", "text", "chars", "truncated", "ms")},
+                          **({"image_file": r["image_file"], "image_prompt": r.get("image_prompt", "")}
+                             if r.get("image_file") else {})}
         if cancel.is_set() or len(results) < len(calls):
             done = {**done, "finish": "cancel"}
             break
@@ -6754,13 +6756,18 @@ def make_handler(svc: Service):
             svc.load()
             max_req = max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest
             bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
-            use_mcp = req.get("strata_mcp") is True and svc.mcp is not None      # the web app's opt-in (serve/mcp.py)
+            use_external_mcp = req.get("strata_mcp") is True and svc.mcp is not None
+            use_image_tool = req.get("strata_image_tool") is True and svc.images is not None
+            use_mcp = use_external_mcp or use_image_tool
             own = {t.get("name") for t in tools or [] if isinstance(t, dict)}   # #592: a second line of defence
             if use_mcp:
-                if not self._own_page("MCP tools can be used"):   # tools run with the user's rights on this PC
+                if not self._own_page("Local tools can be used"):   # image tool shares the GPU and consumes resources
                     return
-                svc.mcp.wait(10)                                  # servers still starting (only right after start)
-                extra = svc.mcp.template_tools(exclude=own)       # the request's own tools win a name clash
+                if use_external_mcp:
+                    svc.mcp.wait(10)                               # servers still starting (only right after start)
+                from serve.image_tools import ChatImageHub
+                hub = ChatImageHub(svc, svc.mcp if use_external_mcp else None)
+                extra = hub.template_tools(exclude=own)            # the request's own tools win a name clash
                 use_mcp = bool(extra)
                 tools = (tools or []) + extra or None
             if force and use_mcp:
@@ -6773,7 +6780,7 @@ def make_handler(svc: Service):
                 svc.session_v1.store_api(session_id, original_messages)
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req, cancel=cancel)
             _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
-            run = run_with_mcp(svc, svc.mcp, messages, tools, kw, ids, thinking, max_new, max_req, req, cancel,
+            run = run_with_mcp(svc, hub, messages, tools, kw, ids, thinking, max_new, max_req, req, cancel,
                                {t["name"] for t in extra}) if use_mcp else None
             chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run, force=force)
             if validator is not None:

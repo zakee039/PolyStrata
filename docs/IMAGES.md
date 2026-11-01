@@ -42,6 +42,30 @@ time of sd.cpp's default half overlap.
 
 ## Use it
 
+### Generate an image inside a chat
+
+When image generation is enabled in the run config, PolyStrata's own web chat
+also offers a built-in `polystrata__generate_image` tool. The model decides when
+to call it: for example, ask it to "draw a mint-green robot cat". The resulting
+PNG is displayed **in the same assistant message**, followed by the model's
+reply. Nothing is sent to an external service. Calls are opt-in for the web
+chat: they use `strata_image_tool: true`, are checked for the page's trusted
+Origin, and are **not** offered to ordinary OpenAI API requests.
+
+The built-in tool reuses `POST /v1/images/generations`'s image backend, FIFO
+GPU turn and resource policy; it does not install an MCP server or replace
+any external MCP tools. For an 8 GB GPU, `"gpu_policy": "unload"` and
+`"reload": "eager"` let the service save a text conversation, unload
+the LLM, create an image, and reload the LLM before resuming. If restoring
+the KV session fails, subsequent turns can rebuild their context from the
+chat history. The PNG is kept by the existing `/v1/images/files/` route,
+using a random, unguessable file name; the name acts as its access token.
+
+The built-in tool defaults to 512×512 and can select 768×768 or 1024×1024.
+The image backend must be configured separately for each server deployment;
+it is not tied to a particular text model. If image generation is not
+configured, the regular chat and external MCP tools behave as before.
+
     curl http://127.0.0.1:8080/v1/images/generations -H "Content-Type: application/json" \
       -d '{"prompt": "a cartoon sloth mascot waving, flat vector illustration", "size": "1024x1024", "seed": 42}'
 
