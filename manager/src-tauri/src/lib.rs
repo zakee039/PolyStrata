@@ -1124,6 +1124,48 @@ fn open_url(port: u16) -> Result<(), String> {
     Ok(())
 }
 
+// Tauri's minimizable/maximizable=false disables their actions. Windows still
+// reserves button slots in some title bars, so also remove the two native
+// window-style bits; WS_SYSMENU stays intact and preserves the Close button.
+fn keep_close_button_only(window: &tauri::WebviewWindow) {
+    use std::ffi::c_void;
+
+    unsafe extern "system" {
+        fn GetWindowLongPtrW(hwnd: *mut c_void, index: i32) -> isize;
+        fn SetWindowLongPtrW(hwnd: *mut c_void, index: i32, value: isize) -> isize;
+        fn SetWindowPos(
+            hwnd: *mut c_void,
+            after: *mut c_void,
+            x: i32, y: i32, width: i32, height: i32, flags: u32
+        ) -> i32;
+    }
+
+    const GWL_STYLE: i32 = -16;
+    const WS_MINIMIZEBOX: isize = 0x0002_0000;
+    const WS_MAXIMIZEBOX: isize = 0x0001_0000;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+
+    let _ = window.unmaximize();
+    let _ = window.unminimize();
+    if let Ok(handle) = window.hwnd() {
+        let hwnd = handle.0 as *mut c_void;
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            let stripped = style & !(WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+            if stripped != style {
+                SetWindowLongPtrW(hwnd, GWL_STYLE, stripped);
+                SetWindowPos(
+                    hwnd, std::ptr::null_mut(), 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                );
+            }
+        }
+    }
+}
+
 fn show(app: &tauri::AppHandle, position: Option<(i32, i32)>) {
     if let Some(w) = app.get_webview_window("main") {
         if let Some((x, y)) = position {
@@ -1152,6 +1194,7 @@ fn show(app: &tauri::AppHandle, position: Option<(i32, i32)>) {
                 let _ = w.set_position(Position::Physical(tauri::PhysicalPosition::new(px, py)));
             }
         }
+        let _ = w.unmaximize();
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
@@ -1348,6 +1391,9 @@ pub fn run() {
             open_chat
         ])
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                keep_close_button_only(&window);
+            }
             let app_handle = app.handle().clone();
             let menu = Menu::with_items(
                 app,

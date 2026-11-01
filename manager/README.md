@@ -24,6 +24,12 @@ Tauri 2 / Rust + TypeScript tray control panel. Windows 10 / 11. This is a nativ
 - The Overview bottom strip has equal-width **cache hit rate** and **Cloudflare Tunnel** panels. Cache hit rate counts completed requests reusing at least one prompt token divided by the backend's most recent completed requests (up to 500); without requests it displays a dash. Tunnel displays a status lamp, last measured HTTPS round-trip time, Test and Restart buttons. Connection status uses localhost-only cloudflared Prometheus metrics at port 23188 when running.
 - The General Settings tab contains only manager startup behavior and watchdog; no deployment paths or explanatory card. The model/config details remain viewable from the selection dialog.
 
+## v0.1.12 Close-only compact title bar
+
+- Remove both Minimize and Maximize title-bar buttons, retaining only Close (which continues to hide the manager to the system tray).
+- Disable window minimization/maximization in Tauri configuration and remove the corresponding native Windows title-bar styles so they are actually absent rather than merely greyed out.
+- Unmaximize an existing window before showing it again, keeping the original compact dimensions.
+
 ## v0.1.11 Embedded UI and reliable window restore
 
 - Build production portable executables with **`npm run build -- --no-bundle`** (Tauri CLI). Direct `cargo build --release` alone does not activate Tauri's bundled frontend custom protocol and can result in a `127.0.0.1` connection-refused page.
