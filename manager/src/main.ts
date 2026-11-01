@@ -7,7 +7,7 @@ import { modelIsLoaded } from "./model-state";
 type Prefs={autostart:boolean;auto_load_model:boolean;manual_model_hold:boolean;watchdog:boolean;lan_access:boolean;cf_enabled:boolean;cf_binary:string;cf_hostname:string;config_path:string;project_path:string;port:number};
 type Model={name:string;path:string;model:string;context:number|null;quantization:string|null;engine:string|null;tokenizer:string|null;draft_model:string|null;vision_projector:string|null;kv_type:string|null;vram_reserve_mib:number|null;idle_unload_s:number|null;conversation_cache_mib:string|null};
 type Metrics={engine?:Record<string,unknown>;live?:Record<string,unknown>;hardware?:Record<string,unknown>;totals?:Record<string,number>;requests?:Array<Record<string,number>>;conversation_cache?:{requests?:number;requests_reused?:number;reused_tokens?:number}};
-type Status={phase:string;managed:boolean;desired:boolean;error:string;restarts:number;settings:Prefs;metrics:Metrics|null;host_gpu?:Record<string,number>|null;cf_running:boolean;cf_connections:number|null;cf_error:string;cf_latency_ms:number|null;cf_test_status:string;cf_token_present:boolean;api_key_present:boolean};
+type Status={phase:string;managed:boolean;desired:boolean;error:string;restarts:number;settings:Prefs;metrics:Metrics|null;host_gpu?:Record<string,number>|null;cf_running:boolean;cf_connections:number|null;cf_error:string;cf_latency_ms:number|null;cf_test_status:string;cf_token_present:boolean;api_key_present:boolean;lan_chat_url?:string|null};
 let prefs:Prefs|null=null, status:Status|null=null, models:Model[]=[], tab="overview", busy=false, toast="";
 const root=document.getElementById("app")!;
 const esc=(x:unknown)=>String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]||c));
@@ -101,11 +101,18 @@ function cfView(){
 function cfLatency(){
  return typeof status?.cf_latency_ms==="number"?status.cf_latency_ms+" ms":"— ms";
 }
+function lanChatLink(){
+ const url=prefs?.lan_access?status?.lan_chat_url:null;
+ if(!prefs?.lan_access)return "";
+ return url && /^http:\/\/(?:\d{1,3}\.){3}\d{1,3}:\d+\/$/.test(url)
+   ? `<a class="lan-chat-link" href="${esc(url)}" title="${esc(url)}（HTTP 明文，建议使用本地 HTTPS 网关）" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`
+   : `<span class="lan-chat-pending">正在获取局域网地址…</span>`;
+}
 function apiPage(){return `<section class="api-compact">
  <div class="setting-card api-panel">
   <div class="api-line"><strong>端口</strong><input id="port-field" type="number" class="field port-field" min="1024" max="65535" value="${prefs?.port||18081}"><button class="outline-small" id="save-api-port" ${status?.managed?"disabled":""}>保存</button></div>
   <div class="api-line"><strong>API Key</strong><input id="api-key-display" class="field key-display" type="text" readonly value="" autocomplete="off"><button id="copy-key" class="outline-small">复制</button><button id="rotate-key" class="outline-small">更换</button></div>
-  <label class="api-line toggle-compact"><strong>局域网 HTTP 直连</strong><span class="line-fill"></span><input type="checkbox" data-setting="lan_access" ${prefs?.lan_access?"checked":""}><span class="switch"></span></label>
+  <div class="api-line toggle-compact lan-toggle-row"><strong>局域网 HTTP 直连</strong><span class="lan-chat-slot">${lanChatLink()}</span><label class="lan-toggle" title="启用或关闭局域网 HTTP 访问"><input type="checkbox" data-setting="lan_access" ${prefs?.lan_access?"checked":""}><span class="switch"></span></label></div>
  </div>
  <div class="setting-card tunnel-panel">
   <div class="tunnel-heading"><strong>Cloudflare Tunnel</strong>${cfView()}</div>
@@ -201,6 +208,8 @@ async function poll(){try{status=await invoke<Status>("get_status");if(!prefs)pr
  if(tab==="api"){
    const indicator=document.querySelector(".api-compact .cf-indicator");
    if(indicator)indicator.outerHTML=cfView();
+   const slot=document.querySelector(".lan-chat-slot");
+   if(slot && slot.innerHTML!==lanChatLink())slot.innerHTML=lanChatLink();
    const latency=document.querySelector("[data-cf-latency]");
    if(latency)latency.textContent=cfLatency();
    const message=document.querySelector("[data-cf-message]");

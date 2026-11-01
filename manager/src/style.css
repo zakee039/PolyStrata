@@ -76,6 +76,14 @@
 .api-compact .toggle-compact input:checked + .switch{background:#39c5bb}
 .api-compact .toggle-compact input:checked + .switch:before{transform:translateX(16px)}
 .api-compact .toggle-compact input:focus-visible + .switch{outline:2px solid #238f86;outline-offset:3px}
+.api-compact .lan-toggle-row{gap:9px}
+.api-compact .lan-toggle-row>strong{flex:0 0 auto;font-size:11px}
+.api-compact .lan-chat-slot{flex:1 1 auto;min-width:0;font:10px/1.2 Consolas,monospace;color:#238f86}
+.api-compact .lan-chat-link{display:block;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:#238f86;text-decoration:none}
+.api-compact .lan-chat-link:hover{text-decoration:underline}
+.api-compact .lan-chat-pending{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:#8ba0a1}
+.api-compact .lan-toggle{display:flex;align-items:center;justify-content:center;position:relative;flex:0 0 38px;width:38px;height:24px;cursor:pointer}
+.api-compact .lan-toggle .switch{margin-left:0}
 .api-compact .tunnel-heading{height:44px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #edf3f1}
 .api-compact .tunnel-heading>strong{font-size:13px}
 .api-compact .tunnel-panel .api-line>label{flex-basis:48px}

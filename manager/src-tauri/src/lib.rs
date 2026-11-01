@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    net::{SocketAddr, TcpStream},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket},
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -160,6 +160,20 @@ fn initial_prefs() -> Preferences {
         .unwrap_or_default();
     p.autostart = registry_has_autostart();
     p
+}
+
+// Look up the current IPv4 selected by Windows' routing table. UDP connect
+// does not transmit any packet; it only asks Windows which LAN adapter to use.
+// Recomputed on each status poll so a DHCP address change is reflected in UI.
+fn active_lan_ipv4() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:9").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip)
+            if !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified()
+                && !ip.is_multicast() => Some(ip),
+        _ => None,
+    }
 }
 
 fn port_open(port: u16) -> bool {
@@ -597,8 +611,13 @@ async fn get_status(state: State<'_, AppState>) -> Result<Value, String> {
             guard.cf_test_status.clone(),
         )
     };
-    let (metrics, host_gpu, cf_connections) = tauri::async_runtime::spawn_blocking(move || {
+    let (metrics, host_gpu, cf_connections, lan_chat_url) = tauri::async_runtime::spawn_blocking(move || {
         let metrics = api_get(prefs.port, "/metrics").ok();
+        let lan_chat_url = if prefs.lan_access && owned && metrics.is_some() {
+            active_lan_ipv4().map(|ip| format!("http://{ip}:{}/", prefs.port))
+        } else {
+            None
+        };
         let gpu = if metrics.is_none() {
             gpu_memory_without_service()
         } else {
@@ -609,7 +628,7 @@ async fn get_status(state: State<'_, AppState>) -> Result<Value, String> {
         } else {
             None
         };
-        (metrics, gpu, connections)
+        (metrics, gpu, connections, lan_chat_url)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -652,6 +671,7 @@ async fn get_status(state: State<'_, AppState>) -> Result<Value, String> {
         "restarts":restarts,"settings":state.inner.lock().map_err(|e| e.to_string())?.prefs.clone(),
         "metrics":metrics,"host_gpu":host_gpu,"cf_running":cf_running,
         "cf_connections":cf_connections,"cf_latency_ms":cf_latency_ms,"cf_test_status":cf_test_status,
+        "lan_chat_url":lan_chat_url,
         "cf_error":cf_error, "cf_token_present":security::read("cf-tunnel-token")?.is_some(),
         "api_key_present":security::read("api-key")?.is_some()}),
     )

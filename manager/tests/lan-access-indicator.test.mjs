@@ -18,3 +18,13 @@ test("direct LAN exposure is described as HTTP and the default is loopback", () 
   assert.match(native, /lan_access:\s*false/);
   assert.match(native, /if p\.lan_access \{ "0\.0\.0\.0" \} else \{ "127\.0\.0\.1" \}/);
 });
+
+test("enabled LAN displays an up-to-date clickable Chat address", () => {
+  assert.match(ui, /function lanChatLink\(/);
+  assert.match(ui, /lan_chat_url/);
+  assert.match(ui, /class="lan-chat-link"/);
+  assert.match(ui, /!prefs\?\.lan_access/);
+  assert.match(native, /fn active_lan_ipv4\(/);
+  assert.match(native, /"lan_chat_url":lan_chat_url/);
+  assert.match(native, /if prefs\.lan_access && owned && metrics\.is_some\(\)/);
+});
