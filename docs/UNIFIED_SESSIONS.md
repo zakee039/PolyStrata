@@ -10,7 +10,7 @@ PolyStrata follows **LLM as a service**. The service owns the durable history an
 - Pinning the chat title is not the same as locking its KV. Both are explicit operations.
 - When a current-model snapshot does not exist, does not match the conversation prefix, or cannot be restored, the request is fulfilled using normal Prefill.
 - A lock request with no snapshot is stored as a pending intent. The engine performs disk SAVE only on a safe serial session switch/unload, not from the HTTP handler thread.
-- Models without native disk session support still use the exact same history database; they cannot claim a saved KV until one actually exists.
+- Models without native disk session support still use the exact same history database; they cannot claim a saved KV until one actually exists. Upstream `strata-poly` does not support disk sessions; the PolyStrata fork advertises its native SAVE/RESTORE implementation through `INFO session_files=1` before `READY`, and the server checks that capability rather than guessing from the executable name.
 - The legacy one-model schema is migrated in place; a zero-byte SQLite database initializes automatically.
 - Delete removes all model-specific KV and attachments associated with the conversation.
 

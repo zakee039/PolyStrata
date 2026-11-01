@@ -69,6 +69,19 @@ class TestHistoryV2(unittest.TestCase):
         self.assertIsNone(self.store.get("chat1"))
         self.assertFalse(self.store.snapshot_path("chat1","model-A").exists())
 
+    def test_disk_sessions_follow_engine_capability(self):
+        from serve.server import StrataEngine
+        engine = StrataEngine.__new__(StrataEngine)
+        engine.spawn = ("strata-poly.exe", [], None, None, None, False, None)
+        engine.info = {}
+        self.assertFalse(engine.disk_sessions)  # unmodified upstream binary
+        engine.info["session_files"] = 1
+        self.assertTrue(engine.disk_sessions)  # our native disk SAVE/RESTORE
+        engine.info["session_files"] = 0
+        self.assertFalse(engine.disk_sessions)
+        engine.spawn = ("strata.exe", [], None, None, None, False, None)
+        self.assertTrue(engine.disk_sessions)
+
     def test_upgrade_legacy_0_byte_and_old_cache(self):
         # Current user's deleted 0-byte db should transparently initialize.
         with tempfile.TemporaryDirectory() as d:
