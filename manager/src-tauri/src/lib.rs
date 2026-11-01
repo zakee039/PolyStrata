@@ -396,6 +396,9 @@ fn start_backend(state: &AppState) -> Result<(), String> {
             return Ok(());
         }
     }
+    // The API service is the resident process; even a failed initial spawn
+    // remains "desired" so the watchdog can retry it.
+    inner.desired = true;
     let child = match spawn_backend(&inner.prefs) {
         Ok(child) => child,
         Err(e) => {
@@ -465,6 +468,8 @@ fn stop_backend(state: &AppState) -> Result<(), String> {
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     inner.stopping = false;
     if result.is_err() && child_running(&mut child) {
+        // A failed safe-unload must not silently disable the API watchdog.
+        inner.desired = true;
         inner.child = Some(child);
     } else {
         inner.child = None;
@@ -501,6 +506,22 @@ async fn load_model(state: State<'_, AppState>) -> Result<(), String> {
             Ok(())
         } else {
             Err(format!("模型加载失败：{value}"))
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn unload_model(state: State<'_, AppState>) -> Result<(), String> {
+    let port = state.inner.lock().map_err(|e| e.to_string())?.prefs.port;
+    tauri::async_runtime::spawn_blocking(move || {
+        // Keep the API process resident; the server persists active KV before
+        // releasing the model, as with its ordinary 15-minute idle unload.
+        let value = api_post(port, "/unload?wait=30", 36)?;
+        match value["status"].as_str() {
+            Some("unloaded" | "not loaded") => Ok(()),
+            _ => Err(format!("模型卸载未完成：{value}")),
         }
     })
     .await
@@ -810,50 +831,81 @@ fn get_settings(state: State<'_, AppState>) -> Result<Preferences, String> {
 }
 
 #[tauri::command]
-fn save_settings(state: State<'_, AppState>, incoming: Preferences) -> Result<Preferences, String> {
-    if incoming.port < 1024 || incoming.config_path.trim().is_empty() {
-        return Err("端口必须大于等于 1024，配置路径不能为空".into());
-    }
-    if !Path::new(&incoming.config_path).is_file() {
-        return Err("配置文件不存在".into());
-    }
-    if !Path::new(&incoming.project_path)
-        .join("serve/server.py")
-        .is_file()
-        || !Path::new(&incoming.project_path)
-            .join(".venv/Scripts/python.exe")
+async fn save_settings(
+    app: tauri::AppHandle,
+    incoming: Preferences,
+) -> Result<Preferences, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if incoming.port < 1024 || incoming.config_path.trim().is_empty() {
+            return Err("端口必须大于等于 1024，配置路径不能为空".into());
+        }
+        if !Path::new(&incoming.config_path).is_file() {
+            return Err("配置文件不存在".into());
+        }
+        if !Path::new(&incoming.project_path)
+            .join("serve/server.py")
             .is_file()
-    {
-        return Err("部署目录不正确：必须包含 serve/server.py 和 .venv/Scripts/python.exe".into());
-    }
-    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    let is_running = inner.child.as_mut().is_some_and(child_running);
-    if is_running
-        && (incoming.config_path != inner.prefs.config_path
-            || incoming.project_path != inner.prefs.project_path
-            || incoming.port != inner.prefs.port
-            || incoming.lan_access != inner.prefs.lan_access
-            || incoming.cf_enabled != inner.prefs.cf_enabled
-            || incoming.cf_binary != inner.prefs.cf_binary)
-    {
-        return Err("请先停止服务，再修改局域网访问、Tunnel 或部署配置".into());
-    }
-    if incoming.cf_enabled && security::read("cf-tunnel-token")?.is_none() {
-        return Err("请先保存 Cloudflare Tunnel Token，再启用 Tunnel".into());
-    }
-    let mut merged = incoming;
-    // Keep only explicitly registered configurations. Merely selecting a config
-    // must not silently re-register a previously removed config.
-    merged.registered_configs.sort_by_key(|x| x.to_lowercase());
-    merged
-        .registered_configs
-        .dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-    if merged.autostart != inner.prefs.autostart {
-        set_autostart(merged.autostart)?;
-    }
-    save_prefs(&merged)?;
-    inner.prefs = merged.clone();
-    Ok(merged)
+            || !Path::new(&incoming.project_path)
+                .join(".venv/Scripts/python.exe")
+                .is_file()
+        {
+            return Err(
+                "部署目录不正确：必须包含 serve/server.py 和 .venv/Scripts/python.exe".into(),
+            );
+        }
+        if incoming.cf_enabled && security::read("cf-tunnel-token")?.is_none() {
+            return Err("请先保存 Cloudflare Tunnel Token，再启用 Tunnel".into());
+        }
+        let state = app.state::<AppState>();
+        let (old, running) = {
+            let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+            (
+                inner.prefs.clone(),
+                inner.child.as_mut().is_some_and(child_running),
+            )
+        };
+        let needs_restart = incoming.config_path != old.config_path
+            || incoming.project_path != old.project_path
+            || incoming.port != old.port
+            || incoming.lan_access != old.lan_access
+            || incoming.cf_enabled != old.cf_enabled
+            || incoming.cf_binary != old.cf_binary;
+        if running && needs_restart {
+            // Always persist active KV before changing the model or listener.
+            if api_get(old.port, "/metrics").is_err() {
+                return Err("API 尚未准备好，请稍后再切换配置".into());
+            }
+            stop_backend(&state)?;
+        }
+        let mut updated = incoming;
+        // Only user-registered configurations; do not rediscover unregistered JSONs.
+        updated.registered_configs.sort_by_key(|x| x.to_lowercase());
+        updated
+            .registered_configs
+            .dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        let apply = (|| -> Result<(), String> {
+            if updated.autostart != old.autostart {
+                set_autostart(updated.autostart)?;
+            }
+            save_prefs(&updated)?;
+            state.inner.lock().map_err(|e| e.to_string())?.prefs = updated.clone();
+            Ok(())
+        })();
+        if let Err(e) = apply {
+            if running && needs_restart {
+                let _ = start_backend(&state);
+            }
+            return Err(e);
+        }
+        if running && needs_restart {
+            // Manager owns the API lifespan; configuration changes restart the
+            // API gracefully without forcing an active inference to end.
+            start_backend(&state)?;
+        }
+        Ok(updated)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
@@ -1081,6 +1133,7 @@ pub fn self_test() -> i32 {
     // --self-test probes API lifecycle without loading GPU weights.
     // --self-test-full additionally validates real GPU model preloading.
     let full = std::env::args().any(|arg| arg == "--self-test-full");
+    let model_toggle = std::env::args().any(|arg| arg == "--self-test-model");
     prefs.auto_load_model = full;
     prefs.lan_access = false;
     prefs.cf_enabled = false;
@@ -1100,7 +1153,8 @@ pub fn self_test() -> i32 {
         }),
     };
     let mut report = json!({"test":"manager start/stop", "port":prefs.port, "lazy":!full,
-        "full_model_test":full, "gpu_without_service":gpu_memory_without_service()});
+        "full_model_test":full, "model_toggle_test":model_toggle,
+        "gpu_without_service":gpu_memory_without_service()});
     let result: Result<(), String> = (|| {
         start_backend(&state)?;
         let mut metrics = None;
@@ -1122,6 +1176,21 @@ pub fn self_test() -> i32 {
                 "Expected model state {expected}, got {}",
                 data["live"]["state"]
             ));
+        }
+        if model_toggle {
+            let loaded = api_post(prefs.port, "/load", 180)?;
+            if loaded["status"] != "loaded" {
+                return Err(format!("model LOAD failed: {loaded}"));
+            }
+            report["model_loaded"] = json!(true);
+            let unloaded = api_post(prefs.port, "/unload?wait=30", 40)?;
+            if !matches!(unloaded["status"].as_str(), Some("unloaded" | "not loaded")) {
+                return Err(format!("model UNLOAD failed: {unloaded}"));
+            }
+            if !port_open(prefs.port) || api_get(prefs.port, "/metrics").is_err() {
+                return Err("API went offline after model-only UNLOAD".into());
+            }
+            report["model_unloaded_api_online"] = json!(true);
         }
         stop_backend(&state)?;
         thread::sleep(Duration::from_millis(500));
@@ -1174,6 +1243,7 @@ pub fn run() {
             start_service,
             stop_service,
             load_model,
+            unload_model,
             get_status,
             get_settings,
             save_settings,
@@ -1195,8 +1265,8 @@ pub fn run() {
                 app,
                 &[
                     &MenuItem::with_id(app, "open", "打开控制面板", true, None::<&str>)?,
-                    &MenuItem::with_id(app, "start", "启动服务", true, None::<&str>)?,
-                    &MenuItem::with_id(app, "stop", "停止服务", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "load", "加载模型", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "unload", "卸载模型", true, None::<&str>)?,
                     &MenuItem::with_id(app, "chat", "打开 Chat", true, None::<&str>)?,
                     &MenuItem::with_id(app, "quit", "退出管理器", true, None::<&str>)?,
                 ],
@@ -1210,18 +1280,39 @@ pub fn run() {
                     let id = event.id().as_ref();
                     match id {
                         "open" => show(app, None),
-                        "start" => {
-                            if let Err(e) = start_backend(&app.state::<AppState>()) {
-                                let _ = app.emit("manager-error", e);
-                                show(app, None);
-                            }
-                        }
-                        "stop" => {
+                        "load" | "unload" => {
                             let app2 = app.clone();
+                            let loading = id == "load";
                             thread::spawn(move || {
-                                let result = stop_backend(&app2.state::<AppState>());
-                                if let Err(e) = result {
-                                    let _ = app2.emit("manager-error", e);
+                                let port = match app2.state::<AppState>().inner.lock() {
+                                    Ok(guard) => guard.prefs.port,
+                                    Err(e) => {
+                                        let _ = app2.emit("manager-error", e.to_string());
+                                        return;
+                                    }
+                                };
+                                let response = if loading {
+                                    api_post(port, "/load", 120)
+                                } else {
+                                    api_post(port, "/unload?wait=30", 36)
+                                };
+                                match response {
+                                    Ok(value)
+                                        if (loading && value["status"] == "loaded")
+                                            || (!loading
+                                                && matches!(
+                                                    value["status"].as_str(),
+                                                    Some("unloaded" | "not loaded")
+                                                )) => {}
+                                    Ok(value) => {
+                                        let _ = app2.emit(
+                                            "manager-error",
+                                            format!("模型操作失败：{value}"),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        let _ = app2.emit("manager-error", e);
+                                    }
                                 }
                             });
                         }
@@ -1266,18 +1357,14 @@ pub fn run() {
                 }
             }
             watchdog(app_handle.clone());
-            if app_handle
-                .state::<AppState>()
-                .inner
-                .lock()
-                .unwrap()
-                .prefs
-                .auto_load_model
-            {
-                thread::spawn(move || {
-                    let _ = start_backend(&app_handle.state::<AppState>());
-                });
-            }
+            // Always start the API and keep it resident while Manager is alive.
+            // auto_load_model only decides whether the heavyweight engine is
+            // loaded immediately or starts lazily without occupying VRAM.
+            thread::spawn(move || {
+                if let Err(e) = start_backend(&app_handle.state::<AppState>()) {
+                    let _ = app_handle.emit("manager-error", e);
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {

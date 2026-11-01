@@ -5,12 +5,12 @@ Tauri 2 / Rust + TypeScript tray control panel. Windows 10 / 11. This is a nativ
 ## Behavior
 
 - Double-click the tray icon to show the small control panel. Close the window to hide it; the manager stays in the tray.
-- Right-click tray icon for **Open panel / Start / Stop / Chat / Exit**.
-- Start uses the active deployment JSON, localhost port 18081, and `E:\LLM\deploy\polystrata\.venv\Scripts\python.exe`.
-- Stop waits for the server's `POST /unload?wait=30` response before stopping the Python process tree. That endpoint saves V1 KV state before unloading. If unload reports busy or fails, manager **does not forcibly stop** the service.
+- Right-click tray icon for **Open panel / Load model / Unload model / Chat / Exit**.
+- Launching Manager **always starts and watches** the local Python API service, using the active deployment JSON and port 18081. Its process remains online while Manager runs. The startup auto-load option controls *model weights*, not whether the API starts.
+- The main button keeps its original labels **启动服务 / 停止服务**, but now means **load/unload the model**. Unload saves active KV and releases GPU/RAM without stopping the API; the redundant 'load now' link is removed. Tray menu labels explicitly say Load / Unload model. The API process is stopped only when Manager exits.
 - Idle unload is **not** manual shutdown: the server remains alive, accepting requests and automatically reloading the model when needed.
 - Settings: start with Windows (HKCU Run, per-user), auto-load model on manager startup, and watchdog with a capped three-attempt retry. API settings live under the separate API tab; the selected deployment config is managed from the Overview dialog.
-- **Automatic model load OFF (default)**: manager starts without starting the Python service. Clicking Start launches the Python API in `--lazy` mode; first request (or immediate load button) loads the model. **ON**: manager starts the service and preloads the model when manager starts. This option only takes effect automatically on next manager launch.
+- **Automatic model load OFF (default)**: Manager starts the API in `--lazy` mode and leaves GPU model weights unloaded until the load button or a client inference request. **ON**: Manager starts the API with weights preloaded. In both cases the API stays online and its process is supervised. This setting takes effect on the next API launch.
 - Chat opens the original web interface; the manager does not duplicate it.
 - Workflow Prefix Cache page is a labelled placeholder until the separate native registry/prefill project is implemented.
 - An existing old `.bat` server on the same port is shown as an external service, not silently adopted or killed.
@@ -18,7 +18,7 @@ Tauri 2 / Rust + TypeScript tray control panel. Windows 10 / 11. This is a nativ
 ## v0.1.4 UI
 
 - The Overview card has a **选择配置文件 (Select configuration)** button. It opens a popup showing only explicitly registered configuration JSON files and the active configuration. Other JSONs on disk do not reappear automatically. **注册配置文件** opens a native file chooser. Switching the active config does not discard other registrations.
-- The second tab is **API**. Port, read-only visible API Key with only **Copy / Rotate** actions, and LAN access each fit on one compact row. Tunnel shows only domain, encrypted token entry, and **Install / Test / Restart** buttons. Port or access-mode changes require the service to be stopped.
+- The second tab is **API**. Port, read-only visible API Key with only **Copy / Rotate** actions, and LAN access each fit on one compact row. Tunnel shows only domain, encrypted token entry, and **Install / Test / Restart** buttons. A model-config, port or access change gracefully saves/unloads KV and automatically restarts the API with the new settings.
 - Each JSON is listed **by filename** with the associated model name, maximum context tokens, and quantization. The **查看 (View)** action opens a read-only details dialog showing the model GGUF path, engine, tokenizer, KV precision, vision projector, optional draft model, VRAM reserve, memory cache budget, and idle unload timer (when set).
 - The Overview card shows the **active config filename**, model name, and configured context window even when the server is stopped.
 - The Overview bottom strip has equal-width **cache hit rate** and **Cloudflare Tunnel** panels. Cache hit rate counts completed requests reusing at least one prompt token divided by the backend's most recent completed requests (up to 500); without requests it displays a dash. Tunnel displays a status lamp, last measured HTTPS round-trip time, Test and Restart buttons. Connection status uses localhost-only cloudflared Prometheus metrics at port 23188 when running.
@@ -53,7 +53,7 @@ Run the compiled native executable with `--self-test` to verify a real start/sto
 
 ## Implementation notes
 
-- On intentional Stop, watchdog is disabled before stopping. A manual restart resets the desired state. A model idle unload does not require supervisor restart.
+- Unloading the model **does not** disable the API watchdog; manual and idle unload retain the API process and V1 KV snapshots. Only exiting Manager requests a safe API shutdown. The backend still auto-loads on a new inference request after an unload.
 - On abnormal process exit, watchdog may restart no more than three times in a manager session.
 - The manager only stops processes it personally started, to prevent accidentally killing another localhost service.
 - Live metrics come from `GET /metrics`. When the API is offline, GPU VRAM readings use local `nvidia-smi.exe` as a fallback. Decode/Prefill speeds use the current or most recent request, and the scope of token totals is clearly labelled.

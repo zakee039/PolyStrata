@@ -24,7 +24,7 @@ function badge(){const [s,c]=phases[status?.phase||"stopped"]||["异常","bad"];
 function render(){
  root.innerHTML=`<header class="head"><div class="brand"><div class="brand-symbol"><b>P</b></div><div><h1>PolyStrata</h1><small>LOCAL MODEL MANAGER</small></div></div><span id="phase">${badge()}</span></header>
  <nav class="tabs">${Object.keys(names).map(t=>`<button class="tab ${tab===t?"selected":""}" data-tab="${t}">${names[t]}</button>`).join("")}</nav>
- <main id="content"></main><footer><span id="notice">${esc(toast||"本机服务管理 · Windows")}</span><span>v0.1.5</span></footer>`;
+ <main id="content"></main><footer><span id="notice">${esc(toast||"本机服务管理 · Windows")}</span><span>v0.1.6</span></footer>`;
  document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(b=>b.onclick=()=>{tab=b.dataset.tab!;render();});
  content();
 }
@@ -32,6 +32,7 @@ function metric(title:string,val:string,unit:string,sub:string){return `<div cla
 function overview(){
  const m=status?.metrics, t=m?.totals||{}, hw=m?.hardware||status?.host_gpu||{}, r=m?.requests?.[0];
  const live=m?.live||{}, owned=!!status?.managed, phase=status?.phase||"stopped";
+ const modelLoaded=owned&&!["unloaded","stopped","starting","stopping","error","external"].includes(phase);
  const cache=m?.conversation_cache, checked=cache?.requests||0, hits=cache?.requests_reused||0;
  const hitPct=checked>0?Math.min(100,Math.max(0,100*hits/checked)):0;
  const prefill=live.state==="reading"?live.prefill_tok_s_mean:(r?.prompt_ms?((r.prompt_tokens||0)-(r.reused||0))*1000/r.prompt_ms:null);
@@ -39,7 +40,7 @@ function overview(){
  const selected=activeConfig(), model=selected?.name|| (typeof m?.engine?.model==="string"?m.engine.model:"未找到当前配置");
  const shownModel=String(model).startsWith("G4-MeroMero-26B-A4B")?"G4-MeroMero 26B · "+(selected?.quantization||"Q4_K_M"):String(model);
  const currentFile=label(prefs?.config_path||"");
- const modelHint=phase==="error"?(status?.error||"启动异常，请查看运行日志"):phase==="external"?"检测到外部服务，请先停止旧版批处理再由 Manager 启动":phase==="unloaded"?"GPU / RAM 已自动释放；API 保持在线":owned?"由 Manager 托管 · 127.0.0.1:"+prefs?.port:"服务未启动 · 127.0.0.1:"+prefs?.port;
+ const modelHint=phase==="error"?(status?.error||"API 启动失败，请查看日志"):phase==="external"?"API 被其他进程占用":phase==="unloaded"?"模型已卸载 · API 持续在线":owned?"API 常驻 · 127.0.0.1:"+prefs?.port:"API 正在启动 · 127.0.0.1:"+prefs?.port;
  return `<section><div class="model-card"><div class="model-head"><span>当前配置文件</span><div class="config-head-actions"><button id="choose-config" class="chip chip-action">选择配置文件 ▾</button><button class="chip chip-action" id="home-config-detail" ${selected?'':'disabled'}>查看</button></div></div>
    <h2 title="${esc(model)}">${esc(shownModel)}</h2>
    <div class="current-config-meta"><span title="${esc(prefs?.config_path)}">${esc(currentFile)}</span><span>${selected?.context?esc(ctxText(selected.context)):"上下文未指定"}</span></div>
@@ -61,8 +62,8 @@ function overview(){
   <div class="tunnel-monitor-latency"><span>${cfLatency()}</span><small>HTTPS 延迟</small></div>
   <div class="monitor-buttons"><button data-cf-action="test">测试</button><button data-cf-action="restart">重启</button></div>
  </div></div>
- <div class="actions"><button id="btn-service" class="primary" ${busy||phase==="starting"||phase==="stopping"||phase==="external"?"disabled":""}>${owned?"■ 停止服务":"▶ 启动服务"}</button><button class="secondary" id="btn-chat">打开 Chat ↗</button></div>
- <div class="subactions"><button id="btn-load" ${!owned||phase!=="unloaded"?"disabled":""}>立即加载模型</button><button id="btn-log">查看运行日志</button></div></section>`;
+ <div class="actions"><button id="btn-service" class="primary" title="${modelLoaded?"卸载模型，API 保持常驻":"加载模型，API 保持常驻"}" ${busy||!owned||phase==="starting"||phase==="stopping"||phase==="external"||phase==="error"?"disabled":""}>${modelLoaded?"■ 停止服务":"▶ 启动服务"}</button><button class="secondary" id="btn-chat">打开 Chat ↗</button></div>
+ <div class="subactions"><button id="btn-log">查看运行日志</button></div></section>`;
 }
 function modelPage(){
  return `<div class="config-picker-intro"><p>只显示已注册的配置文件。</p></div>
@@ -128,9 +129,12 @@ function content(){
    if(field)field.value=key;
   }).catch(e=>mark("读取 API Key 失败："+String(e)));
  }
- document.getElementById("btn-service")?.addEventListener("click",()=>void action(status?.managed?"stop_service":"start_service",status?.managed?"服务已停止，KV 历史已保留":"已发送启动指令"));
+ document.getElementById("btn-service")?.addEventListener("click",()=>{
+  const phase=status?.phase||"stopped";
+  const loaded=Boolean(status?.managed&&!["unloaded","stopped","starting","stopping","error","external"].includes(phase));
+  void action(loaded?"unload_model":"load_model",loaded?"模型已卸载，API 保持在线":"模型已加载");
+ });
  document.getElementById("btn-chat")?.addEventListener("click",()=>void invoke("open_chat").catch(e=>mark(String(e))));
- document.getElementById("btn-load")?.addEventListener("click",()=>void action("load_model","模型加载成功"));
  document.getElementById("btn-log")?.addEventListener("click",()=>void showLogs());
  document.getElementById("home-config-detail")?.addEventListener("click",()=>{const c=activeConfig();if(c)showConfig(c);});
  document.getElementById("choose-config")?.addEventListener("click",()=>void openConfigPicker());

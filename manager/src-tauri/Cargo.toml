@@ -1,6 +1,6 @@
 [package]
 name = "polystrata-manager"
-version = "0.1.5"
+version = "0.1.6"
 description = "PolyStrata Windows tray manager"
 authors = ["PolyStrata contributors"]
 edition = "2021"
