@@ -8,9 +8,9 @@ Tauri 2 / Rust + TypeScript tray control panel. Windows 10 / 11. This is a nativ
 - Right-click tray icon for **Open panel / Load model / Unload model / Chat / Exit**.
 - Launching Manager **always starts and watches** the local Python API service, using the active deployment JSON and port 18081. Its process remains online while Manager runs. The startup auto-load option controls *model weights*, not whether the API starts.
 - The main button keeps its original labels **启动服务 / 停止服务**, but now means **load/unload the model**. Unload saves active KV and releases GPU/RAM without stopping the API; the redundant 'load now' link is removed. Tray menu labels explicitly say Load / Unload model. The API process is stopped only when Manager exits.
-- Idle unload is **not** manual shutdown: the server remains alive, accepting requests and automatically reloading the model when needed.
+- **Manual stop** sends `/unload?wait=30&manual=1`: KV is saved and GPU/RAM released, while inference calls return HTTP 503 until an explicit start. Manager persists this hold across restarts. **15-minute idle unload** is distinct: it releases the model but the next inference request automatically reloads it. The API stays online in both cases.
 - Settings: start with Windows (HKCU Run, per-user), auto-load model on manager startup, and watchdog with a capped three-attempt retry. API settings live under the separate API tab; the selected deployment config is managed from the Overview dialog.
-- **Automatic model load OFF (default)**: Manager starts the API in `--lazy` mode and leaves GPU model weights unloaded until the load button or a client inference request. **ON**: Manager starts the API with weights preloaded. In both cases the API stays online and its process is supervised. This setting takes effect on the next API launch.
+- **Automatic model load OFF (default)**: Manager starts the API in `--lazy` mode and leaves GPU model weights unloaded until the load button or a client inference request (unless manually held). **ON**: Manager starts the API with weights preloaded. In both cases the API stays online and its process is supervised. This setting takes effect on the next API launch.
 - Chat opens the original web interface; the manager does not duplicate it.
 - Workflow Prefix Cache page is a labelled placeholder until the separate native registry/prefill project is implemented.
 - An existing old `.bat` server on the same port is shown as an external service, not silently adopted or killed.
@@ -53,7 +53,7 @@ Run the compiled native executable with `--self-test` to verify a real start/sto
 
 ## Implementation notes
 
-- Unloading the model **does not** disable the API watchdog; manual and idle unload retain the API process and V1 KV snapshots. Only exiting Manager requests a safe API shutdown. The backend still auto-loads on a new inference request after an unload.
+- Unloading the model **does not** disable the API watchdog; manual and idle unload retain the API process and V1 KV snapshots. Only exiting Manager requests a safe API shutdown. Automatic inference-triggered loading applies only after ordinary idle unload, not manual stop.
 - On abnormal process exit, watchdog may restart no more than three times in a manager session.
 - The manager only stops processes it personally started, to prevent accidentally killing another localhost service.
 - Live metrics come from `GET /metrics`. When the API is offline, GPU VRAM readings use local `nvidia-smi.exe` as a fallback. Decode/Prefill speeds use the current or most recent request, and the scope of token totals is clearly labelled.

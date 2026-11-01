@@ -30,6 +30,7 @@ const RUN_NAME: &str = "PolyStrata Manager";
 struct Preferences {
     autostart: bool,
     auto_load_model: bool,
+    manual_model_hold: bool,
     watchdog: bool,
     lan_access: bool,
     cf_enabled: bool,
@@ -52,6 +53,7 @@ impl Default for Preferences {
         Self {
             autostart: false,
             auto_load_model: false,
+            manual_model_hold: false,
             watchdog: true,
             lan_access: false,
             cf_enabled: false,
@@ -246,12 +248,16 @@ fn spawn_backend(p: &Preferences) -> Result<Child, String> {
         .arg("--host")
         .arg(if p.lan_access { "0.0.0.0" } else { "127.0.0.1" })
         .env("STRATA_API_KEY", api_key)
+        .env(
+            "STRATA_MANUAL_MODEL_HOLD",
+            if p.manual_model_hold { "1" } else { "0" },
+        )
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::from(logfile))
         .stderr(Stdio::from(errlog))
         .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
-    if !p.auto_load_model {
+    if !p.auto_load_model || p.manual_model_hold {
         cmd.arg("--lazy");
     }
     cmd.spawn().map_err(|e| format!("服务启动失败：{e}"))
@@ -497,32 +503,41 @@ async fn stop_service(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?
 }
 
+fn persist_manual_hold(state: &AppState, held: bool) -> Result<(), String> {
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    let mut updated = inner.prefs.clone();
+    updated.manual_model_hold = held;
+    save_prefs(&updated)?;
+    inner.prefs = updated;
+    Ok(())
+}
+
 #[tauri::command]
-async fn load_model(state: State<'_, AppState>) -> Result<(), String> {
-    let port = state.inner.lock().map_err(|e| e.to_string())?.prefs.port;
+async fn load_model(app: tauri::AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let port = state.inner.lock().map_err(|e| e.to_string())?.prefs.port;
         let value = api_post(port, "/load", 120)?;
-        if value["status"] == "loaded" {
-            Ok(())
-        } else {
-            Err(format!("模型加载失败：{value}"))
+        if value["status"] != "loaded" {
+            return Err(format!("模型加载失败：{value}"));
         }
+        persist_manual_hold(&state, false)
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn unload_model(state: State<'_, AppState>) -> Result<(), String> {
-    let port = state.inner.lock().map_err(|e| e.to_string())?.prefs.port;
+async fn unload_model(app: tauri::AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        // Keep the API process resident; the server persists active KV before
-        // releasing the model, as with its ordinary 15-minute idle unload.
-        let value = api_post(port, "/unload?wait=30", 36)?;
-        match value["status"].as_str() {
-            Some("unloaded" | "not loaded") => Ok(()),
-            _ => Err(format!("模型卸载未完成：{value}")),
+        let state = app.state::<AppState>();
+        let port = state.inner.lock().map_err(|e| e.to_string())?.prefs.port;
+        // manual=1 blocks inference-triggered reloads; normal idle unload does not.
+        let value = api_post(port, "/unload?wait=30&manual=1", 36)?;
+        if !matches!(value["status"].as_str(), Some("unloaded" | "not loaded")) {
+            return Err(format!("模型卸载未完成：{value}"));
         }
+        persist_manual_hold(&state, true)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -574,6 +589,24 @@ async fn get_status(state: State<'_, AppState>) -> Result<Value, String> {
     })
     .await
     .map_err(|e| e.to_string())?;
+    // Also capture explicit model operations made through the local API/Web UI.
+    // An API crash/restart must not accidentally erase a user's manual hold.
+    if owned {
+        if let Some(actual) = metrics
+            .as_ref()
+            .and_then(|m| m["live"]["manual_hold"].as_bool())
+        {
+            let saved = state
+                .inner
+                .lock()
+                .map_err(|e| e.to_string())?
+                .prefs
+                .manual_model_hold;
+            if saved != actual {
+                persist_manual_hold(&state, actual)?;
+            }
+        }
+    }
     let phase = if stopping {
         "stopping"
     } else if owned && metrics.is_some() {
@@ -878,6 +911,13 @@ async fn save_settings(
             stop_backend(&state)?;
         }
         let mut updated = incoming;
+        // Runtime model hold is controlled only by model actions, not stale UI settings.
+        updated.manual_model_hold = state
+            .inner
+            .lock()
+            .map_err(|e| e.to_string())?
+            .prefs
+            .manual_model_hold;
         // Only user-registered configurations; do not rediscover unregistered JSONs.
         updated.registered_configs.sort_by_key(|x| x.to_lowercase());
         updated
@@ -1135,6 +1175,7 @@ pub fn self_test() -> i32 {
     let full = std::env::args().any(|arg| arg == "--self-test-full");
     let model_toggle = std::env::args().any(|arg| arg == "--self-test-model");
     prefs.auto_load_model = full;
+    prefs.manual_model_hold = false;
     prefs.lan_access = false;
     prefs.cf_enabled = false;
     let state = AppState {
@@ -1294,7 +1335,7 @@ pub fn run() {
                                 let response = if loading {
                                     api_post(port, "/load", 120)
                                 } else {
-                                    api_post(port, "/unload?wait=30", 36)
+                                    api_post(port, "/unload?wait=30&manual=1", 36)
                                 };
                                 match response {
                                     Ok(value)
@@ -1303,7 +1344,14 @@ pub fn run() {
                                                 && matches!(
                                                     value["status"].as_str(),
                                                     Some("unloaded" | "not loaded")
-                                                )) => {}
+                                                )) =>
+                                    {
+                                        if let Err(e) =
+                                            persist_manual_hold(&app2.state::<AppState>(), !loading)
+                                        {
+                                            let _ = app2.emit("manager-error", e);
+                                        }
+                                    }
                                     Ok(value) => {
                                         let _ = app2.emit(
                                             "manager-error",

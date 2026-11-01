@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./style.css";
 
-type Prefs={autostart:boolean;auto_load_model:boolean;watchdog:boolean;lan_access:boolean;cf_enabled:boolean;cf_binary:string;cf_hostname:string;config_path:string;project_path:string;port:number};
+type Prefs={autostart:boolean;auto_load_model:boolean;manual_model_hold:boolean;watchdog:boolean;lan_access:boolean;cf_enabled:boolean;cf_binary:string;cf_hostname:string;config_path:string;project_path:string;port:number};
 type Model={name:string;path:string;model:string;context:number|null;quantization:string|null;engine:string|null;tokenizer:string|null;draft_model:string|null;vision_projector:string|null;kv_type:string|null;vram_reserve_mib:number|null;idle_unload_s:number|null;conversation_cache_mib:string|null};
 type Metrics={engine?:Record<string,unknown>;live?:Record<string,unknown>;hardware?:Record<string,unknown>;totals?:Record<string,number>;requests?:Array<Record<string,number>>;conversation_cache?:{requests?:number;requests_reused?:number;reused_tokens?:number}};
 type Status={phase:string;managed:boolean;desired:boolean;error:string;restarts:number;settings:Prefs;metrics:Metrics|null;host_gpu?:Record<string,number>|null;cf_running:boolean;cf_connections:number|null;cf_error:string;cf_latency_ms:number|null;cf_test_status:string;cf_token_present:boolean;api_key_present:boolean};
@@ -17,14 +17,14 @@ const label=(p:string)=>p.split(/[\\/]/).pop()||p;
 const names:Record<string,string>={overview:"总览",api:"API",workflows:"工作流",settings:"设置"};
 const activeConfig=()=>models.find(m=>m.path.toLowerCase()===prefs?.config_path.toLowerCase());
 const ctxText=(n:number|null|undefined)=>typeof n==="number" ? n.toLocaleString("zh-CN")+" Token" : "未指定";
-const phases:Record<string,[string,string]>={idle:["运行中","good"],reading:["Prefill","good"],generating:["生成中","good"],unloaded:["空闲卸载","warn"],starting:["启动中","warn"],stopping:["停止中","warn"],stopped:["已停止","dim"],external:["外部进程","warn"],error:["启动失败","bad"]};
+const phases:Record<string,[string,string]>={idle:["运行中","good"],reading:["Prefill","good"],generating:["生成中","good"],unloaded:["空闲卸载","warn"],paused:["手动停止","warn"],starting:["启动中","warn"],stopping:["停止中","warn"],stopped:["已停止","dim"],external:["外部进程","warn"],error:["启动失败","bad"]};
 async function copyText(value:string){try{await navigator.clipboard.writeText(value);}catch{const e=document.createElement("textarea");e.value=value;document.body.appendChild(e);e.select();const ok=document.execCommand("copy");e.remove();if(!ok)throw Error("剪贴板不可用");}}
 function mark(s:string){toast=s;const e=document.getElementById("notice");if(e)e.textContent=s;}
 function badge(){const [s,c]=phases[status?.phase||"stopped"]||["异常","bad"];return `<span class="badge ${c}"><i></i>${s}</span>`;}
 function render(){
  root.innerHTML=`<header class="head"><div class="brand"><div class="brand-symbol"><b>P</b></div><div><h1>PolyStrata</h1><small>LOCAL MODEL MANAGER</small></div></div><span id="phase">${badge()}</span></header>
  <nav class="tabs">${Object.keys(names).map(t=>`<button class="tab ${tab===t?"selected":""}" data-tab="${t}">${names[t]}</button>`).join("")}</nav>
- <main id="content"></main><footer><span id="notice">${esc(toast||"本机服务管理 · Windows")}</span><span>v0.1.6</span></footer>`;
+ <main id="content"></main><footer><span id="notice">${esc(toast||"本机服务管理 · Windows")}</span><span>v0.1.7</span></footer>`;
  document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach(b=>b.onclick=()=>{tab=b.dataset.tab!;render();});
  content();
 }
@@ -32,7 +32,7 @@ function metric(title:string,val:string,unit:string,sub:string){return `<div cla
 function overview(){
  const m=status?.metrics, t=m?.totals||{}, hw=m?.hardware||status?.host_gpu||{}, r=m?.requests?.[0];
  const live=m?.live||{}, owned=!!status?.managed, phase=status?.phase||"stopped";
- const modelLoaded=owned&&!["unloaded","stopped","starting","stopping","error","external"].includes(phase);
+ const modelLoaded=owned&&!["unloaded","paused","stopped","starting","stopping","error","external"].includes(phase);
  const cache=m?.conversation_cache, checked=cache?.requests||0, hits=cache?.requests_reused||0;
  const hitPct=checked>0?Math.min(100,Math.max(0,100*hits/checked)):0;
  const prefill=live.state==="reading"?live.prefill_tok_s_mean:(r?.prompt_ms?((r.prompt_tokens||0)-(r.reused||0))*1000/r.prompt_ms:null);
@@ -40,7 +40,7 @@ function overview(){
  const selected=activeConfig(), model=selected?.name|| (typeof m?.engine?.model==="string"?m.engine.model:"未找到当前配置");
  const shownModel=String(model).startsWith("G4-MeroMero-26B-A4B")?"G4-MeroMero 26B · "+(selected?.quantization||"Q4_K_M"):String(model);
  const currentFile=label(prefs?.config_path||"");
- const modelHint=phase==="error"?(status?.error||"API 启动失败，请查看日志"):phase==="external"?"API 被其他进程占用":phase==="unloaded"?"模型已卸载 · API 持续在线":owned?"API 常驻 · 127.0.0.1:"+prefs?.port:"API 正在启动 · 127.0.0.1:"+prefs?.port;
+ const modelHint=phase==="error"?(status?.error||"API 启动失败，请查看日志"):phase==="external"?"API 被其他进程占用":phase==="paused"?"模型已手动停止 · 等待主动加载":phase==="unloaded"?"15 分钟空闲卸载 · 请求可自动唤醒":owned?"API 常驻 · 127.0.0.1:"+prefs?.port:"API 正在启动 · 127.0.0.1:"+prefs?.port;
  return `<section><div class="model-card"><div class="model-head"><span>当前配置文件</span><div class="config-head-actions"><button id="choose-config" class="chip chip-action">选择配置文件 ▾</button><button class="chip chip-action" id="home-config-detail" ${selected?'':'disabled'}>查看</button></div></div>
    <h2 title="${esc(model)}">${esc(shownModel)}</h2>
    <div class="current-config-meta"><span title="${esc(prefs?.config_path)}">${esc(currentFile)}</span><span>${selected?.context?esc(ctxText(selected.context)):"上下文未指定"}</span></div>

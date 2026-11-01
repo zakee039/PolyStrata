@@ -3254,6 +3254,8 @@ class Service:
         # only start it again when this much VRAM is free, and run this command first (e.g. to unload another
         # server's model); the next request after an unload starts the engine again
         self.idle_unload_s = 0
+        # Explicit manual stop blocks request-triggered model loads; idle unload does not.
+        self.manual_unloaded = os.environ.get("STRATA_MANUAL_MODEL_HOLD") == "1"
         self.min_free_vram_mib = 0
         self.before_load = None
         self.before_load_timeout_s = BEFORE_LOAD_TIMEOUT_S   # #1997: how long the before_load command may run
@@ -3438,7 +3440,7 @@ class Service:
         if target is None:
             raise KeyError(name)
         if target["current"]:
-            self.load()
+            self.load(explicit=True)
             return {**target, "status": "loaded"}
         if target["status"] == "unavailable":
             raise ValueError(f"{target['id']} cannot be loaded: {target['problem']}")
@@ -3841,9 +3843,10 @@ class Service:
         except Exception:
             return None
 
-    def ensure_loaded(self):
-        """Start the engine if it is not running (unloaded, or it died - issue #27), after the before_load hook and
-        the free-VRAM check.  The caller holds self.fifo."""
+    def ensure_loaded(self, explicit: bool = False):
+        """Auto-start on requests, except when manually held. Explicit loads resume."""
+        if self.manual_unloaded and not explicit:
+            raise GpuBusy("model manually stopped; click Start to load it before sending requests")
         if self.loaded() and not self._vision_down():
             return
         hook_failed = None
@@ -3972,8 +3975,8 @@ class Service:
         print(f"[strata] {e}. {note} The next request starts the engine again."
               f"{' Its log: ' + log if log else ''}", flush=True)
 
-    def load(self):
-        """POST /load and every generation request: start the engine now if it is unloaded (raises GpuBusy)."""
+    def load(self, explicit: bool = False):
+        """Start the engine on requests, unless held; explicit /load clears the hold on success."""
         # a request is on its way: the idle thread must not unload between this and the request's own start
         self.last_request_at = time.time()
         if self.loaded() and not self._vision_down():
@@ -3994,7 +3997,9 @@ class Service:
                         trace["queue_s"] += round(loading - waiting, 3)
                         trace["state"] = "loading"
                 try:
-                    self.ensure_loaded()
+                    self.ensure_loaded(explicit=explicit)
+                    if explicit:
+                        self.manual_unloaded = False
                 finally:
                     if trace is not None:
                         with self.status_lock:
@@ -4007,17 +4012,17 @@ class Service:
 
     UNLOAD_WAIT_S = 300.0       # #1997: POST /unload?wait=1 waits this long for the running turn (wait=<s> to choose)
 
-    def unload_waiting(self, wait_s: float) -> str:
+    def unload_waiting(self, wait_s: float, manual: bool = False) -> str:
         """#1997: unload(), but a running or queued request is waited for (up to wait_s) instead of answering "busy":
         a peer server that needs this GPU can then free the card on the server's terms.  "busy" after wait_s."""
         deadline = time.monotonic() + max(0.0, wait_s)
         while True:
-            r = self.unload()
+            r = self.unload(manual=manual)
             if r != "busy" or time.monotonic() >= deadline:
                 return r
             time.sleep(0.25)
 
-    def unload(self, idle_for: float | None = None) -> str:
+    def unload(self, idle_for: float | None = None, manual: bool = False) -> str:
         """Stop the engine between requests: "unloaded", "not loaded", "busy" (a request is running or waiting, or
         with idle_for: one ran more recently than that) or "unsupported"."""
         if not hasattr(self.engine, "unload"):
@@ -4026,6 +4031,8 @@ class Service:
             return "busy"
         try:
             if not self.engine.alive():
+                if manual:
+                    self.manual_unloaded = True
                 return "not loaded"
             with self.status_lock:
                 if self.status.get("busy") or self.status.get("queued"):
@@ -4040,8 +4047,11 @@ class Service:
             if self.vision is not None and hasattr(self.vision, "unload"):
                 self.vision.unload()
             self.vision_held = False
+            if manual:
+                self.manual_unloaded = True
             print(f"[strata] model unloaded{f' after {idle_for:.0f} s idle' if idle_for else ''}; "
-                  "the next request loads it again", flush=True)
+                  + ("manual hold: only explicit /load resumes the model" if manual
+                     else "the next request loads it again"), flush=True)
             return "unloaded"
         finally:
             self.fifo.release()
@@ -4263,10 +4273,10 @@ class Service:
         elif s.get("busy"):
             state = "generating"
         elif not self.loaded():
-            state = "unloaded"
+            state = "paused" if self.manual_unloaded else "unloaded"
         else:
             state = "idle"
-        live = {"state": state, "queued": s.get("queued", 0), "phase": s.get("phase") if s.get("busy") else None,
+        live = {"state": state, "manual_hold": self.manual_unloaded, "queued": s.get("queued", 0), "phase": s.get("phase") if s.get("busy") else None,
                 "prompt_tokens": s.get("prompt_tokens") if s.get("busy") else None,
                 "prompt_read": None, "prompt_total": None, "generated": s.get("generated") if s.get("busy") else None,
                 "max_tokens": s.get("max_tokens") if s.get("busy") else None,
@@ -6200,7 +6210,8 @@ def make_handler(svc: Service):
                 try:
                     wait_s = unload_wait(parse_qs(urlsplit(self.path).query).get("wait", [None])[0],
                                          svc.UNLOAD_WAIT_S)
-                    r = svc.unload_waiting(wait_s) if wait_s else svc.unload()
+                    manual = parse_qs(urlsplit(self.path).query).get("manual", ["0"])[0] == "1"
+                    r = svc.unload_waiting(wait_s, manual=manual) if wait_s else svc.unload(manual=manual)
                 except EngineStuck as e:
                     self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
@@ -6208,7 +6219,7 @@ def make_handler(svc: Service):
                 return
             if path == "/load":                              # load now, e.g. ahead of a request
                 try:
-                    svc.load()
+                    svc.load(explicit=True)
                     self._json(200, {"status": "loaded"})
                 except GpuBusy as e:
                     ra = getattr(e, "retry_after", None)
@@ -6263,7 +6274,8 @@ def make_handler(svc: Service):
                             with svc.status_lock:
                                 if svc.status.get("busy") or svc.status.get("queued"):
                                     raise ModelBusy("a request is running or queued")
-                            svc.ensure_loaded()
+                            svc.ensure_loaded(explicit=True)
+                            svc.manual_unloaded = False
                             svc.last_request_at = time.time()
                         finally:
                             svc.fifo.release()
