@@ -1,0 +1,228 @@
+"""Small persistent character-card and keyword-lorebook store for the first-party chat.
+
+No model engine changes. Existing OpenAI-compatible requests remain untouched.
+SQLite file sits next to SessionV1's server-owned conversations database.
+"""
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
+from uuid import uuid4
+
+CARD_ID = re.compile(r"^[a-f0-9]{32}$")
+SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+FIELDS = {"name": 80, "description": 6000, "personality": 4000,
+          "scenario": 4000, "first_mes": 3000, "mes_example": 4000}
+MAX_CARDS = 200
+MAX_LORE = 100
+MAX_SOURCES = 12
+MAX_JSON_BYTES = 256 * 1024
+
+
+def _text(value, limit: int, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field}: expected text")
+    if len(value) > limit:
+        raise ValueError(f"{field}: exceeds {limit} characters")
+    return value.strip()
+
+
+def valid_card(data: object) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("card must be an object")
+    card = {f: _text(data.get(f, ""), limit, f) for f, limit in FIELDS.items()}
+    if not card["name"]:
+        raise ValueError("character name is required")
+    ident = data.get("id") or uuid4().hex
+    if not isinstance(ident, str) or not CARD_ID.fullmatch(ident):
+        raise ValueError("invalid character id")
+    card["id"] = ident
+    raw_lore = data.get("lorebook", [])
+    if not isinstance(raw_lore, list) or len(raw_lore) > MAX_LORE:
+        raise ValueError("lorebook must be a list of at most 100 entries")
+    lore = []
+    for entry in raw_lore:
+        if not isinstance(entry, dict):
+            raise ValueError("lore entry must be an object")
+        keys = _text(entry.get("keys", ""), 300, "lore keys")
+        content = _text(entry.get("content", ""), 2500, "lore content")
+        constant = entry.get("constant", False)
+        if not isinstance(constant, bool):
+            raise ValueError("lore constant must be boolean")
+        if content and (keys or constant):
+            lore.append({"keys": keys, "content": content, "constant": constant})
+    card["lorebook"] = lore
+    raw_sources = data.get("sources", [])
+    if not isinstance(raw_sources, list) or len(raw_sources) > MAX_SOURCES:
+        raise ValueError("Markdown sources must be a list of at most 12 items")
+    sources = []
+    for item in raw_sources:
+        if not isinstance(item, dict) or item.get("kind") not in ("file", "directory"):
+            raise ValueError("source kind must be file or directory")
+        path = _text(item.get("path", ""), 1024, "source path")
+        if not path:
+            continue
+        recursive = item.get("recursive", True)
+        if not isinstance(recursive, bool):
+            raise ValueError("source recursive must be boolean")
+        sources.append({"kind": item["kind"], "path": path, "recursive": recursive})
+    card["sources"] = sources
+    if len(json.dumps(card, ensure_ascii=False).encode("utf-8")) > MAX_JSON_BYTES:
+        raise ValueError("card is too large")
+    return card
+
+
+def card_from_tavern(raw: object) -> dict:
+    """Import standard JSON character cards (V1, V2 and V3 data wrapper).
+    PNG metadata is intentionally not parsed in this lightweight first version.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("import file must contain a JSON object")
+    data = raw.get("data", raw)
+    if not isinstance(data, dict):
+        raise ValueError("character data must be a JSON object")
+    out = {k: data.get(k, "") for k in FIELDS}
+    out["lorebook"] = []
+    book = data.get("character_book") or {}
+    if isinstance(book, dict):
+        for entry in book.get("entries", []):
+            if not isinstance(entry, dict) or not entry.get("enabled", True):
+                continue
+            keys = entry.get("keys") or entry.get("key") or []
+            out["lorebook"].append({
+                "keys": ", ".join(str(k) for k in keys) if isinstance(keys, list) else str(keys),
+                "content": entry.get("content", ""),
+                "constant": bool(entry.get("constant", False)),
+            })
+    return valid_card(out)
+
+
+def card_to_tavern(card: dict) -> dict:
+    data = {k: card.get(k, "") for k in FIELDS}
+    data["character_book"] = {
+        "name": data["name"] + " lorebook",
+        "entries": [{"keys": [k.strip() for k in item["keys"].split(",") if k.strip()],
+                     "content": item["content"], "enabled": True,
+                     "constant": item["constant"]}
+                    for item in card.get("lorebook", [])],
+    }
+    return {"spec": "chara_card_v2", "spec_version": "2.0", "data": data}
+
+
+class CharacterStore:
+    def __init__(self, root: str | Path):
+        self.path = Path(root) / "character_cards.sqlite3"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._db() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS options (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS assignments (session_id TEXT PRIMARY KEY, card_id TEXT NOT NULL)")
+
+    @contextmanager
+    def _db(self):
+        db = sqlite3.connect(self.path, timeout=10)
+        db.row_factory = sqlite3.Row
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    def snapshot(self) -> dict:
+        with self._db() as db:
+            cards = [json.loads(row[0]) for row in db.execute("SELECT data FROM cards ORDER BY rowid")]
+            rows = db.execute("SELECT session_id,card_id FROM assignments").fetchall()
+            persona = db.execute("SELECT value FROM options WHERE key='persona'").fetchone()
+        return {"cards": cards, "assignments": {r[0]: r[1] for r in rows},
+                "persona": persona[0] if persona else ""}
+
+    def save(self, raw: object) -> dict:
+        card = valid_card(raw)
+        with self._db() as db:
+            n = db.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
+            exists = db.execute("SELECT 1 FROM cards WHERE id=?", (card["id"],)).fetchone()
+            if not exists and n >= MAX_CARDS:
+                raise ValueError("maximum 200 character cards reached")
+            db.execute("INSERT OR REPLACE INTO cards(id,data) VALUES(?,?)",
+                       (card["id"], json.dumps(card, ensure_ascii=False)))
+        return card
+
+    def remove(self, ident: str) -> None:
+        if not isinstance(ident, str) or not CARD_ID.fullmatch(ident):
+            raise ValueError("invalid character id")
+        with self._db() as db:
+            db.execute("DELETE FROM cards WHERE id=?", (ident,))
+            db.execute("DELETE FROM assignments WHERE card_id=?", (ident,))
+
+    def assign(self, session: str, ident: str | None) -> None:
+        if not isinstance(session, str) or not SESSION_ID.fullmatch(session):
+            raise ValueError("invalid session id")
+        if ident is not None and (not isinstance(ident, str) or not CARD_ID.fullmatch(ident)):
+            raise ValueError("invalid character id")
+        with self._db() as db:
+            if ident is not None and not db.execute("SELECT 1 FROM cards WHERE id=?", (ident,)).fetchone():
+                raise ValueError("character not found")
+            db.execute("DELETE FROM assignments WHERE session_id=?", (session,))
+            if ident is not None:
+                db.execute("INSERT INTO assignments VALUES(?,?)", (session, ident))
+
+    def set_persona(self, persona: str) -> str:
+        persona = _text(persona, 4000, "persona")
+        with self._db() as db:
+            db.execute("INSERT OR REPLACE INTO options VALUES('persona', ?)", (persona,))
+        return persona
+
+    def assigned_card(self, session: str) -> dict | None:
+        if not isinstance(session, str) or not SESSION_ID.fullmatch(session):
+            raise ValueError("invalid session id")
+        with self._db() as db:
+            row = db.execute(
+                "SELECT cards.data FROM cards JOIN assignments ON cards.id=assignments.card_id "
+                "WHERE assignments.session_id=?", (session,)
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def get(self, ident: str) -> dict | None:
+        if not isinstance(ident, str) or not CARD_ID.fullmatch(ident):
+            raise ValueError("invalid character id")
+        with self._db() as db:
+            row = db.execute("SELECT data FROM cards WHERE id=?", (ident,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+
+def compose(card: dict | None, persona: str, messages: list[dict],
+            *, lore_limit: int = 3500) -> tuple[str, list[str]]:
+    """Deterministic, bounded first-party prompt section; no extra model calls."""
+    if not card and not persona:
+        return "", []
+    parts = []
+    if card:
+        parts.append(f"You are roleplaying as {card['name']}. Stay consistent with the character.")
+        for label, field in (("Description", "description"), ("Personality", "personality"),
+                             ("Scenario", "scenario"), ("Dialogue examples", "mes_example")):
+            if card.get(field):
+                parts.append(f"{label}:\n{card[field]}")
+    if persona:
+        parts.append("User persona:\n" + persona[:4000])
+    # Search just the recent chat, not generated system text or activated lore.
+    searchable = "\n".join(
+        str(m.get("content", "")) for m in messages[-12:]
+        if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+        and isinstance(m.get("content"), str)
+    ).casefold()
+    matched = []
+    total = 0
+    for entry in (card or {}).get("lorebook", []):
+        keys = [k.strip().casefold() for k in entry["keys"].split(",") if k.strip()]
+        if not (entry["constant"] or any(k in searchable for k in keys)):
+            continue
+        content = entry["content"]
+        if total + len(content) > lore_limit:
+            continue
+        matched.append(entry["keys"] if keys else "(always)")
+        total += len(content)
+        parts.append(f"World information ({matched[-1]}):\n{content}")
+    return "\n\n".join(parts), matched

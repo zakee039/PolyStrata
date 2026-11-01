@@ -25,6 +25,8 @@
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-chat"/></svg>Chat</button>
     <button class="st-tab" role="tab" id="tab-btn-images" aria-controls="view-images" aria-selected="false" data-tab="images" hidden>
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-image"/></svg>Images</button>
+    <button class="st-tab" role="tab" id="tab-btn-characters" aria-controls="view-characters" aria-selected="false" data-tab="characters">
+      Characters</button>
     <button class="st-tab" role="tab" id="tab-btn-monitor" aria-controls="view-monitor" aria-selected="false" data-tab="monitor">
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-activity"/></svg>Monitor</button>
     <button class="st-tab" role="tab" id="tab-btn-about" aria-controls="view-about" aria-selected="false" data-tab="about">
@@ -50,6 +52,12 @@
     </aside>
     <div class="chat-main">
       <button type="button" class="session-expand" id="sidebar-expand" title="Show history" aria-label="Show history" hidden>☰</button>
+    <div class="character-chat-bar" id="character-chat-bar" hidden>
+      <span>角色</span>
+      <select id="chat-character" class="st-input" aria-label="Current chat character"><option value="">普通助手（无角色）</option></select>
+      <button type="button" class="st-btn st-btn--secondary" id="character-manage">编辑</button>
+      <span class="character-chat-status" id="character-chat-status"></span>
+    </div>
     <div class="chat-scroll" id="chat-scroll">
       <div class="chat" id="chat">
         <div class="chat-empty" id="chat-empty">
@@ -80,6 +88,47 @@
         </div>
       </form>
     </div>
+    </div>
+  </section>
+
+  <!-- ============================ Characters ============================ -->
+  <section class="view view--characters" id="view-characters" role="tabpanel" aria-labelledby="tab-btn-characters" hidden>
+    <div class="character-editor">
+      <div class="character-editor-head">
+        <strong>角色与世界书</strong>
+        <select class="st-input" id="card-list" aria-label="Edit character"><option value="">新角色</option></select>
+        <button type="button" class="st-btn st-btn--secondary" id="card-new">新建</button>
+        <button type="button" class="st-btn st-btn--secondary" id="card-import">导入 JSON</button>
+        <input id="card-import-file" type="file" accept=".json,application/json" hidden>
+      </div>
+      <div class="character-editor-grid">
+        <label>角色名<input class="st-input" id="card-name" maxlength="80" placeholder="例如：Miku 老师"></label>
+        <label>身份与背景<textarea class="st-input" id="card-description" rows="3" maxlength="6000"></textarea></label>
+        <label>性格与语气<textarea class="st-input" id="card-personality" rows="3" maxlength="4000"></textarea></label>
+        <label>场景设定<textarea class="st-input" id="card-scenario" rows="2" maxlength="4000"></textarea></label>
+        <label>开场白<textarea class="st-input" id="card-greeting" rows="2" maxlength="3000"></textarea></label>
+        <label>对话示例（可选）<textarea class="st-input" id="card-examples" rows="2" maxlength="4000" placeholder="{{user}}: 你好&#10;{{char}}: 你好呀！"></textarea></label>
+        <div class="character-lore-head"><strong>世界书</strong><span class="muted small">最近对话命中关键词时插入</span><button type="button" class="st-btn st-btn--secondary" id="lore-add">＋ 条目</button></div>
+        <div id="lore-entries" class="lore-entries"></div>
+        <div class="character-lore-head"><strong>Markdown 资料</strong><span class="muted small">读取服务器本机路径，文件保留在原位置</span>
+          <button type="button" class="st-btn st-btn--secondary" id="source-add-file">＋ 文件</button>
+          <button type="button" class="st-btn st-btn--secondary" id="source-add-dir">＋ 目录</button></div>
+        <div id="source-entries" class="lore-entries"></div>
+        <p class="muted small">可填写 Windows 绝对路径，例如 <code>C:\Users\…\OneDrive\notes</code>；目录默认递归扫描 .md 文件。由独立 CPU 检索任务按需选择段落，不启动第二个模型。</p>
+        <div class="source-test-row"><input id="source-test-query" class="st-input" placeholder="检索测试：输入一个问题" maxlength="500">
+          <button type="button" class="st-btn st-btn--secondary" id="source-test-btn">测试检索</button></div>
+        <div id="source-test-results" class="source-test-results" aria-live="polite"></div>
+        <div class="character-editor-actions">
+          <button type="button" class="st-btn st-btn--primary" id="card-save">保存角色</button>
+          <button type="button" class="st-btn st-btn--secondary" id="card-export">导出酒馆 V2 JSON</button>
+          <button type="button" class="st-btn st-btn--secondary" id="card-delete">删除</button>
+        </div>
+        <label>我的 Persona（全局用户设定）
+          <textarea class="st-input" id="user-persona" rows="3" maxlength="4000" placeholder="模型应该如何称呼你、如何理解你的身份"></textarea>
+        </label>
+        <button type="button" class="st-btn st-btn--secondary" id="persona-save">保存 Persona</button>
+        <p class="muted small">不选择角色时，原有聊天保持不变。世界书仅作简单关键词匹配，最多注入 3500 字；角色、世界书与聊天绑定保存在服务器。</p>
+      </div>
     </div>
   </section>
 
@@ -280,5 +329,6 @@
 <div class="st-toasts" id="toasts" aria-live="polite"></div>
 <script src="web/app.js"></script>
 <script src="web/sessions.js"></script>
+<script src="web/characters.js"></script>
 </body>
 </html>

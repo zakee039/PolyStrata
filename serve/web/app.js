@@ -73,14 +73,15 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
 
 let tab = "chat";
 function showTab(name) {
-  tab = ["chat", "images", "monitor", "about"].includes(name) ? name : "chat";
+  tab = ["chat", "images", "characters", "monitor", "about"].includes(name) ? name : "chat";
   for (const b of document.querySelectorAll(".st-tab")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
-  for (const v of ["chat", "images", "monitor", "about"]) $(`view-${v}`).hidden = v !== tab;
+  for (const v of ["chat", "images", "characters", "monitor", "about"]) $(`view-${v}`).hidden = v !== tab;
   if (tab === "images") $("img-prompt").focus();
   if (location.hash.slice(1) !== tab) history.replaceState(null, "", tab === "chat" ? location.pathname : `#${tab}`);
   if (tab === "chat") $("input").focus();
   if (tab === "monitor") loadMcp();
   if (tab === "about") loadConfig();
+  if (tab === "characters" && window.polyCharactersLoad) window.polyCharactersLoad();
   if (lastMetrics) render(lastMetrics);
 }
 for (const b of document.querySelectorAll(".st-tab")) b.onclick = () => showTab(b.dataset.tab);
@@ -95,7 +96,7 @@ function headers(json = false) {
   return h;
 }
 $("api-key").value = store.get("apikey", "");
-$("api-key").onchange = () => { store.set("apikey", $("api-key").value.trim()); toast("success", "API key saved", "Kept in this browser only."); enableServerSessions(); };
+$("api-key").onchange = () => { store.set("apikey", $("api-key").value.trim()); toast("success", "API key saved", "Kept in this browser only."); enableServerSessions(); window.polyCharactersLoad?.(); };
 
 let health = {model: "strata", images: false, max_context: 0};
 async function loadHealth() {
@@ -653,6 +654,7 @@ async function loadServerChat(id) {
   store.set("chat", safeChat()); // do not put base64 images in browser storage
   renderChat();
   await refreshSessionPicker();
+  window.polyCharacterRefresh?.();
 }
 async function enableServerSessions() {
   try {
@@ -672,6 +674,7 @@ async function enableServerSessions() {
       store.set("session-id", sessionId);
     }
     await refreshSessionPicker();
+    window.polyCharacterRefresh?.();
   } catch (e) {
     console.warn("Server chat history unavailable; keeping browser fallback", e);
   }
@@ -728,7 +731,10 @@ function swipeLoad(m) {
 // The streaming itself, shared by send() and regenerateMessage(). On abort it sets m.stopped and returns
 // normally (so the caller can still save the partial answer); on any other error it rethrows.
 async function streamInto(m, el, signal) {
-  const body = {model: health.model, messages: apiMessages(), stream: true, reasoning_effort: settings.thinking};
+  const assembledMessages = apiMessages();
+  const roleSystem = await window.polyCharacterPrompt?.(assembledMessages);
+  if (roleSystem) assembledMessages.unshift(roleSystem);
+  const body = {model: health.model, messages: assembledMessages, stream: true, reasoning_effort: settings.thinking};
   if (!(settings.temperature > 0)) {
     body.temperature = 0;
   } else if (!samplingUntouched(settings)) {
@@ -1153,6 +1159,7 @@ $("new-btn").onclick = async () => {
     await sessionSaveChain;
     sessionId = makeSessionId();
     store.set("session-id", sessionId);
+    window.polyCharacterRefresh?.();
     messages = [];
     store.set("chat", []);
     renderChat();

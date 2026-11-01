@@ -6102,6 +6102,18 @@ def make_handler(svc: Service):
                                records if request_id else {"requests": records, "retention": 100, "persistent": False,
                                                           "loaded": svc.loaded(), "auto_load": hasattr(svc.engine, "restart")})
                 return
+            if path == "/v1/strata/characters":
+                if not self._authorized():
+                    return
+                if not svc.session_v1:
+                    self._json(404, {"error": {"message": "V1 sessions disabled"}})
+                    return
+                if self._foreign_origin():
+                    self._json(403, {"error": {"message": "foreign origin"}})
+                    return
+                from serve.character_cards import CharacterStore
+                self._json(200, CharacterStore(svc.session_v1.root).snapshot())
+                return
             if path == "/v1/strata/sessions" or path.startswith("/v1/strata/sessions/"):
                 if not self._authorized():
                     return
@@ -6281,6 +6293,42 @@ def make_handler(svc: Service):
                 req = json.loads(self._body() or b"{}")
                 if not isinstance(req, dict):
                     raise ValueError("send a JSON object")
+                if path == "/v1/strata/characters":
+                    if not svc.session_v1:
+                        self._json(404, {"error": {"message": "V1 sessions disabled"}})
+                        return
+                    if not self._own_page("private characters and persona can be changed"):
+                        return
+                    from serve.character_cards import CharacterStore, card_from_tavern
+                    cards = CharacterStore(svc.session_v1.root)
+                    action = req.get("action")
+                    if action == "save":
+                        self._json(200, {"card": cards.save(req.get("card"))})
+                    elif action == "import":
+                        self._json(200, {"card": cards.save(card_from_tavern(req.get("card")))})
+                    elif action == "delete":
+                        cards.remove(req.get("id"))
+                        self._json(200, {"deleted": True})
+                    elif action == "assign":
+                        cards.assign(req.get("session_id"), req.get("card_id"))
+                        self._json(200, {"saved": True})
+                    elif action == "persona":
+                        self._json(200, {"persona": cards.set_persona(req.get("persona"))})
+                    elif action in ("retrieve", "test_retrieve"):
+                        question = req.get("query", "")
+                        if not isinstance(question, str) or len(question) > 4000:
+                            raise ValueError("query must be text up to 4000 characters")
+                        card = (cards.get(req.get("card_id")) if action == "test_retrieve"
+                                else cards.assigned_card(req.get("session_id")))
+                        if not card:
+                            self._json(200, {"snippets": [], "scanned_files": 0,
+                                             "errors": [], "elapsed_ms": 0})
+                        else:
+                            from serve.lore_retriever import search_sources
+                            self._json(200, search_sources(card.get("sources", []), question))
+                    else:
+                        raise ValueError("unknown character action")
+                    return
                 if path == "/v1/strata/sessions":
                     if not svc.session_v1:
                         self._json(404, {"error": {"message": "V1 sessions disabled"}})
