@@ -99,6 +99,32 @@ class Command(unittest.TestCase):
             self.assertEqual(gen.family, "sdxl")
             self.assertGreater(images_api.need_mib(gen.cfg, 768, 768), 2000)
 
+    def test_reference_and_negative_prompts(self):
+        import base64, io
+        from PIL import Image
+        image = Image.new("RGB", (256, 256), (40, 120, 220))
+        buff = io.BytesIO(); image.save(buff, format="PNG")
+        encoded = "data:image/png;base64," + base64.b64encode(buff.getvalue()).decode()
+        cfg = {"exe":"sd-cli", "family":"sdxl", "checkpoint":"sdxl.safetensors"}
+        job = images_api.parse_request({"prompt":"portrait", "negative_prompt":"watermark", "size":"512x512",
+                                        "strata_reference_image":encoded, "strata_denoise_strength":0.65}, cfg)
+        self.assertEqual(job["negative_prompt"], "watermark")
+        self.assertTrue(job["reference_png"].startswith(b"\x89PNG"))
+        self.assertEqual(job["denoise_strength"], 0.65)
+        cmd = images_api.sd_cli_args(cfg, {**job,"init_image_path":"reference.png"}, "out.png")
+        self.assertEqual(cmd[cmd.index("--negative-prompt")+1], "watermark")
+        self.assertEqual(cmd[cmd.index("--init-img")+1], "reference.png")
+        self.assertEqual(cmd[cmd.index("--strength")+1], "0.65")
+        for invalid in ["garbage", 123, "data:image/png;base64,YWJj"]:
+            with self.assertRaises(images_api.ImageRequestError):
+                images_api.parse_request({"prompt":"x", "strata_reference_image":invalid}, cfg)
+        for wrong in ["x"*3001, 123, "with\x00null"]:
+            with self.assertRaises(images_api.ImageRequestError):
+                images_api.parse_request({"prompt":"x", "negative_prompt":wrong}, cfg)
+        with self.assertRaises(images_api.ImageRequestError):
+            images_api.parse_request({"prompt":"x", "strata_reference_image":encoded},
+                                     {"family":"qwen_turbo"})
+
     def test_other_steps_and_batch(self):
         cfg = {"exe": "sd-cli", "diffusion_model": "d", "vae": "v", "llm": "l"}
         cmd = images_api.sd_cli_args(cfg, {"prompt": "p", "width": 512, "height": 512, "n": 3, "steps": 4,
@@ -295,6 +321,9 @@ class OverHttp(unittest.TestCase):
         models = json.loads(payload)["models"]
         self.assertEqual([m["id"] for m in models], ["default", "animagine-xl"])
         self.assertTrue(all(m["available"] for m in models))
+        self.assertEqual(models[0]["reference_mode"], "none")
+        self.assertEqual(models[1]["reference_mode"], "img2img")
+        self.assertEqual(models[1]["steps"], 28)
         code, result = self.post({"prompt": "a watercolor cat", "size": "512x512",
                                   "strata_image_profile": "animagine-xl"})
         self.assertEqual(code, 200, result)

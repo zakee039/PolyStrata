@@ -105,9 +105,46 @@ def parse_request(req: dict, cfg: dict) -> dict:
     seed = _int_field(req, "seed", 0, 2**62, None)
     if seed is None:
         seed = random.SystemRandom().randrange(0, 2**31)
+    negative = req.get("negative_prompt", "")
+    if not isinstance(negative, str) or len(negative) > 3000 or "\0" in negative:
+        raise ImageRequestError("negative_prompt: text up to 3000 characters, no NUL")
+    reference_png = None
+    reference = req.get("strata_reference_image")
+    strength = req.get("strata_denoise_strength", 0.65)
+    if reference is not None:
+        if cfg.get("family") != "sdxl":
+            raise ImageRequestError("selected image model does not support direct reference images")
+        if not isinstance(reference, str) or len(reference) > 7_200_000:
+            raise ImageRequestError("reference image must be a PNG, JPEG or WebP data URL up to 5 MB")
+        if isinstance(strength, bool) or not isinstance(strength, (int, float)) or not 0.05 <= strength <= 1:
+            raise ImageRequestError("strata_denoise_strength: between 0.05 and 1")
+        import base64, binascii, io
+        from PIL import Image, ImageOps
+        match = re.fullmatch(r"data:image/(png|jpeg|webp);base64,([a-zA-Z0-9+/=]+)", reference)
+        if not match:
+            raise ImageRequestError("reference: expected a PNG, JPEG or WebP data URL")
+        try:
+            raw = base64.b64decode(match.group(2), validate=True)
+            if not 0 < len(raw) <= 5 * 1024 * 1024:
+                raise ValueError("reference image size exceeded")
+            with Image.open(io.BytesIO(raw)) as probe:
+                if probe.format not in ("PNG", "JPEG", "WEBP") or probe.width * probe.height > 16_000_000:
+                    raise ValueError("unsupported reference image")
+                probe.verify()
+            with Image.open(io.BytesIO(raw)) as image:
+                image = ImageOps.exif_transpose(image).convert("RGB")
+                if image.size != (w, h):
+                    image = ImageOps.fit(image, (w, h), method=Image.Resampling.LANCZOS)
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                reference_png = buffer.getvalue()
+        except (OSError, ValueError, binascii.Error) as exc:
+            raise ImageRequestError("reference: unsupported or corrupted image") from exc
     from serve.upscale import options
     upscale, style_hint = options(req)
-    return {"prompt": prompt, "width": w, "height": h, "n": n, "steps": steps, "seed": seed,
+    return {"prompt": prompt, "negative_prompt": negative, "reference_png": reference_png,
+            "denoise_strength": float(strength) if reference_png is not None else None,
+            "width": w, "height": h, "n": n, "steps": steps, "seed": seed,
             "response_format": fmt, "upscale": upscale, "style_hint": style_hint}
 
 
@@ -136,8 +173,14 @@ def sd_cli_args(cfg: dict, job: dict, out_pattern: str) -> list[str]:
             "--cfg-scale", str(cfg.get("cfg_scale", 7.0 if family == "sdxl" else 1.0)),
             "--sampling-method", str(cfg.get("sampler", "euler")),
             "-W", str(job["width"]), "-H", str(job["height"])]
-    if family == "sdxl" and cfg.get("negative_prompt"):
-        cmd += ["--negative-prompt", str(cfg["negative_prompt"])]
+    negative = job.get("negative_prompt") or (cfg.get("negative_prompt") if family == "sdxl" else "")
+    if negative:
+        cmd += ["--negative-prompt", str(negative)]
+    if job.get("init_image_path"):
+        if family != "sdxl":
+            raise ImageRequestError("direct reference images require SDXL")
+        cmd += ["--init-img", job["init_image_path"],
+                "--strength", str(job.get("denoise_strength") or 0.65)]
     if family == "qwen_turbo" and job["steps"] == TURBO_STEPS:
         cmd += ["--sigmas", str(cfg.get("sigmas") or TURBO_SIGMAS)]
     cmd += ["-s", str(job["seed"])]
@@ -250,7 +293,12 @@ class ImageGen:
         the GPU turn.  ImageJobFailed when sd-cli fails, times out or is cancelled."""
         work = Path(tempfile.mkdtemp(prefix="job-", dir=self.dir))
         pattern = str(work / "img_%d.png")
-        cmd = sd_cli_args(self.cfg, job, pattern)
+        cmd_job = job
+        if job.get("reference_png") is not None:
+            init = work / "reference.png"
+            init.write_bytes(job["reference_png"])
+            cmd_job = {**job, "init_image_path": str(init)}
+        cmd = sd_cli_args(self.cfg, cmd_job, pattern)
         timeout = float(self.cfg.get("timeout_s") or 3600)
         logf = work / "sd-cli.log"
         t0 = time.monotonic()
@@ -310,6 +358,7 @@ class ImageGen:
             with contextlib.suppress(OSError):
                 work.rmdir()
         figures = {"seconds": round(secs, 2), "steps": job["steps"], "n": job["n"],
+                   "reference_used": bool(job.get("reference_png")),
                    "size": f"{job['width']}x{job['height']}", "seed": job["seed"],
                    "backend": self.cfg.get("backend"), "quant": self.cfg.get("quant")}
         for key, pat in (("text_encode_ms", r"get_learned_condition completed, taking ([0-9.]+) ?ms"),

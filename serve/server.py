@@ -6093,11 +6093,14 @@ def make_handler(svc: Service):
                 if not self._authorized():return
                 if not svc.images:
                     self._json(200, {"models": []});return
-                available = [{"id": "default", "name": svc.images.model,
-                              "family": svc.images.family, "available": not svc.images.missing()}]
-                available += [{"id": ident, "name": gen.model, "family": gen.family,
-                               "available": not gen.missing()}
-                              for ident, gen in svc.image_profiles.items()]
+                def image_model_info(ident, gen):
+                    return {"id": ident, "name": gen.model, "family": gen.family,
+                            "available": not gen.missing(),
+                            "steps": int(gen.cfg.get("steps") or (28 if gen.family == "sdxl" else 8)),
+                            "max_side": int(gen.cfg.get("max_side") or 2048),
+                            "reference_mode": "img2img" if gen.family == "sdxl" else "none"}
+                available = [image_model_info("default", svc.images)]
+                available += [image_model_info(ident, gen) for ident, gen in svc.image_profiles.items()]
                 self._json(200, {"models": available})
                 return
             if path == "/metrics/prometheus":
