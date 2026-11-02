@@ -6396,7 +6396,13 @@ def make_handler(svc: Service):
                     elif action == "reference_remove":
                         self._json(200, {"card": cards.remove_reference(req.get("id"))})
                     elif action == "global":
-                        self._json(200, {"global": cards.set_global(req.get("global"))})
+                        image_ids = {"default"}
+                        if svc.images is not None:
+                            image_ids.add(svc.images.cfg.get("profile_id") or "default")
+                            image_ids.update(ident for ident, gen in svc.image_profiles.items()
+                                             if not gen.missing())
+                        self._json(200, {"global": cards.set_global(
+                            req.get("global"), allowed_image_profiles=image_ids)})
                     elif action in ("inspect_workflow", "prepare_workflow", "commit_workflow"):
                         from serve.workflow_profile import WorkflowRuntime
                         workflow = WorkflowRuntime(cards)

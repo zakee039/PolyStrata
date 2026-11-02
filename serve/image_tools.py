@@ -50,11 +50,25 @@ class ChatImageHub:
         self.svc, self.mcp = svc, mcp
         self.character_name = None
         self.character_reference = None
-        # Reference images are server-owned, never inferred from client paths.
-        # No character identity or image in the stateless/ordinary assistant.
-        if not stateless and session_id and getattr(svc, "session_v1", None) is not None:
+        self.gen = getattr(svc, "images", None)
+        self.profile_id = self.gen.cfg.get("profile_id", "default") if self.gen else "default"
+        cards = None
+        if self.gen is not None and getattr(svc, "session_v1", None) is not None:
             from serve.character_cards import CharacterStore
             cards = CharacterStore(svc.session_v1.root)
+            selected = cards.chat_image_profile()
+            profiles = getattr(svc, "image_profiles", {})
+            if selected in ("default", self.profile_id):
+                self.profile_id = self.gen.cfg.get("profile_id", "default")
+            elif selected in profiles:
+                self.gen = profiles[selected]
+                self.profile_id = selected
+            # Obsolete profile settings fall back to the current default.
+        # Resolve per request so saving a new choice takes effect immediately.
+
+        # Reference images are server-owned, never inferred from client paths.
+        # No character identity or image in the stateless/ordinary assistant.
+        if not stateless and session_id and cards is not None:
             card = cards.assigned_card(session_id)
             if card and card.get("reference_image"):
                 file = cards.image_file(card["id"])
@@ -71,19 +85,25 @@ class ChatImageHub:
 
     def routes(self):
         routes = dict(self.mcp.routes()) if self.mcp else {}
-        if self.svc.images is not None:
+        if self.gen is not None:
             routes[NAME] = (self.builtin, "generate_image")
         return routes
 
     def template_tools(self, exclude=()):
         tools = list(self.mcp.template_tools(exclude=exclude)) if self.mcp else []
-        if self.svc.images is not None and NAME not in exclude:
+        if self.gen is not None and NAME not in exclude:
             tools = [tool for tool in tools if tool.get("name") != NAME]
-            if self.character_reference is not None and self.svc.images.cfg.get("llm_vision"):
+            if self.character_reference is not None and self.gen.cfg.get("family", "qwen_turbo") == "qwen_turbo" and self.gen.cfg.get("llm_vision"):
                 tool = {**SCHEMA, "description": SCHEMA["description"] +
                         f" The current chat character is {self.character_name!r}, and a weak appearance reference is available."}
             else:
                 tool = SCHEMA
+            # Adapt the tool's visual prompt style to the selected backend.
+            if self.gen.cfg.get("family") == "sdxl":
+                tool = {**tool, "description": tool["description"] +
+                        " For this SDXL model, write concise ENGLISH descriptive phrases "
+                        "or anime tags where appropriate; include the user's specified "
+                        "scene, costume, pose and holiday exactly."}
             tools.append(tool)
         return tools
 
@@ -93,8 +113,10 @@ class ChatImageHub:
         start = time.monotonic()
         output = {"server": "PolyStrata", "tool": "generate_image", "truncated": False}
         try:
-            if self.svc.images is None:
+            if self.gen is None:
                 raise ValueError("image generation is not enabled")
+            if callable(getattr(self.gen, "missing", None)) and self.gen.missing():
+                raise ValueError("selected chat image model files are missing")
             if not isinstance(arguments, dict):
                 raise ValueError("expected image arguments as an object")
             request = {
@@ -104,7 +126,7 @@ class ChatImageHub:
                 "strata_style_hint": arguments.get("style_hint") or "auto",
             }
             character_related = arguments.get("character_related") is True
-            if character_related and self.character_reference is not None and self.svc.images.cfg.get("llm_vision"):
+            if character_related and self.character_reference is not None and self.gen.cfg.get("family", "qwen_turbo") == "qwen_turbo" and self.gen.cfg.get("llm_vision"):
                 import base64
                 # Weak reference: never overwrite explicit scene, costume, pose,
                 # calendar/holiday or subject instructions from the conversation.
@@ -115,12 +137,12 @@ class ChatImageHub:
                     "any conflicting details. Never copy unrelated scene or attire from the reference.")
                 request["strata_reference_image"] = ("data:image/png;base64," +
                     base64.b64encode(self.character_reference.read_bytes()).decode("ascii"))
-            job = images_api.parse_request(request, self.svc.images.cfg)
+            job = images_api.parse_request(request, self.gen.cfg)
             if "strata_reference_image" in request:
                 job["character_weak_reference"] = True
             if cancel and cancel.is_set():
                 raise RuntimeError("image generation cancelled")
-            gen = self.svc.images
+            gen = self.gen
             if self.svc.session_v1:
                 gen.dir = self.svc.session_v1.root / "generated-images"
                 gen.dir.mkdir(parents=True, exist_ok=True)
@@ -131,6 +153,8 @@ class ChatImageHub:
                 figures.update(up)
             filename = gen.store(images[0])
             output["image_file"] = filename
+            output["image_profile"] = self.profile_id
+            output["image_model"] = getattr(gen, "model", self.profile_id)
             output["image_prompt"] = str(arguments.get("prompt") or "")
             output["character_reference_used"] = bool(job.get("character_weak_reference"))
             if figures.get("upscale_original_files"):

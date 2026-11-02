@@ -104,6 +104,46 @@ class ChatImageToolTests(unittest.TestCase):
                 hub_ordinary=ChatImageHub(svc,session_id="chat_sess1")
                 self.assertIsNone(hub_ordinary.character_reference)
 
+    def test_chat_model_switch_without_changing_page_or_character_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CharacterStore(tmp)
+            card = store.save({"name":"Miku", "description":"teal twin tails"})
+            buf = io.BytesIO();Image.new("RGB",(64,64),(35,180,190)).save(buf,"PNG")
+            store.upload_reference(card["id"],base64.b64encode(buf.getvalue()).decode())
+            store.assign("session_1",card["id"])
+            svc = self.make_service()
+            svc.images.cfg.update({"profile_id":"qwen-image-2.1-turbo-official",
+                                   "llm_vision":"mmproj.gguf", "model_name":"official"})
+            svc.session_v1=types.SimpleNamespace(root=Path(tmp))
+            selected = FakeImage()
+            # SDXL may inherit the default Qwen mmproj key in resolved configs;
+            # it must still NEVER auto-apply a character picture via img2img.
+            selected.cfg.update({"family":"sdxl", "steps":28, "model_name":"Animagine",
+                                 "llm_vision":"inherited-qwen-mmproj.gguf"})
+            svc.image_profiles={"animagine-xl-4-opt": selected}
+            store.set_global({"chat_image_profile":"animagine-xl-4-opt"},
+                  allowed_image_profiles={"default","qwen-image-2.1-turbo-official","animagine-xl-4-opt"})
+            with patch("serve.image_tools.images_api.gpu_turn") as turn:
+                @contextlib.contextmanager
+                def no_gpu(svc_arg, generator, job, cancel):
+                    self.assertIs(generator, selected)
+                    yield "unload"
+                turn.side_effect=no_gpu
+                hub = ChatImageHub(svc,session_id="session_1")
+                self.assertIs(hub.gen,selected)
+                self.assertIn("SDXL", hub.template_tools()[0]["description"])
+                self.assertNotIn("weak appearance reference", hub.template_tools()[0]["description"])
+                answer=hub.call(NAME,{"prompt":"Miku at winter festival", "character_related":True})
+                self.assertTrue(answer["ok"],answer)
+                self.assertEqual(answer["image_profile"],"animagine-xl-4-opt")
+                self.assertEqual(selected.calls[-1]["steps"],28)
+                self.assertFalse(answer["character_reference_used"])
+            self.assertEqual(len(svc.images.calls),0)
+            store.set_global({"chat_image_profile":"default"},
+                  allowed_image_profiles={"default","animagine-xl-4-opt"})
+            self.assertIs(ChatImageHub(svc,session_id="session_1").gen,svc.images)
+            self.assertIsNone(ChatImageHub(svc,session_id="session_1",stateless=True).character_reference)
+
     def test_bad_request_fails_without_invoking_generator(self):
         svc = self.make_service()
         result = ChatImageHub(svc).call(NAME, {"prompt": "", "size": "512x512"})

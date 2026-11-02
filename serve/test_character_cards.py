@@ -51,13 +51,13 @@ class CharacterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = CharacterStore(tmp)
             self.assertEqual(db.snapshot(), {"cards":[], "assignments":{}, "global":{
-                "user_name":"", "user_description":"", "default_role":"stateless"}})
+                "user_name":"", "user_description":"", "default_role":"stateless", "chat_image_profile":"default"}})
             card = db.save(self.sample())
             db.set_global({"user_name":"Zakee", "user_description":"喜欢编程", "default_role":"ordinary"})
             db.assign("a" * 32, card["id"])
             saved = CharacterStore(tmp).snapshot()
             self.assertEqual(saved["global"], {"user_name":"Zakee", "user_description":"喜欢编程",
-                                              "default_role":"ordinary"})
+                                              "default_role":"ordinary", "chat_image_profile":"default"})
             self.assertEqual(saved["assignments"]["a" * 32], card["id"])
             self.assertEqual(saved["cards"][0]["name"], "Miku 老师")
             db.remove(card["id"])
@@ -85,6 +85,25 @@ class CharacterTests(unittest.TestCase):
                     db.set_global({"default_role": invalid})
             with self.assertRaises(ValueError):
                 db.save({"name":"Oops", "persona_mode":"unknown"})
+
+    def test_chat_image_profile_global_persistence_and_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CharacterStore(tmp)
+            allowed = {"default", "qwen-image-2.1-turbo-official",
+                       "qwen-image-2.1-turbo-uncensored", "animagine-xl-4-opt", "sdxl-base-1"}
+            self.assertEqual(store.chat_image_profile(), "default")
+            saved = store.set_global({"user_name":"u", "user_description":"",
+                "default_role":"ordinary", "chat_image_profile":"sdxl-base-1"},
+                allowed_image_profiles=allowed)
+            self.assertEqual(saved["chat_image_profile"], "sdxl-base-1")
+            self.assertEqual(CharacterStore(tmp).chat_image_profile(), "sdxl-base-1")
+            store.set_global({"user_name":"u2", "default_role":"stateless"},
+                             allowed_image_profiles=allowed)
+            self.assertEqual(store.snapshot()["global"]["chat_image_profile"], "sdxl-base-1")
+            for invalid in ("../../foo", "not-configured", 1, ""):
+                with self.assertRaises(ValueError):
+                    store.set_global({"chat_image_profile": invalid}, allowed_image_profiles=allowed)
+            self.assertEqual(store.chat_image_profile(), "sdxl-base-1")
 
     def test_card_roundtrip(self):
         x = valid_card(self.sample())

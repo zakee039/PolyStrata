@@ -153,11 +153,12 @@ class CharacterStore:
             rows = db.execute("SELECT session_id,card_id FROM assignments").fetchall()
             settings = {r[0]:r[1] for r in db.execute(
                 "SELECT key,value FROM options WHERE key IN "
-                "('user_name','user_description','default_role')")}
+                "('user_name','user_description','default_role','chat_image_profile')")}
         return {"cards": cards, "assignments": {r[0]:r[1] for r in rows},
                 "global": {"user_name": settings.get("user_name", ""),
                            "user_description": settings.get("user_description", ""),
-                           "default_role": settings.get("default_role", "stateless")}}
+                           "default_role": settings.get("default_role", "stateless"),
+                           "chat_image_profile": settings.get("chat_image_profile", "default")}}
 
     def save(self, raw: object) -> dict:
         card = valid_card(raw)
@@ -263,7 +264,7 @@ class CharacterStore:
             if ident is not None:
                 db.execute("INSERT INTO assignments VALUES(?,?)", (session, ident))
 
-    def set_global(self, raw: object) -> dict:
+    def set_global(self, raw: object, *, allowed_image_profiles: set[str] | None = None) -> dict:
         if not isinstance(raw, dict):
             raise ValueError("global settings must be an object")
         name = _text(raw.get("user_name", ""), 80, "user_name")
@@ -274,12 +275,28 @@ class CharacterStore:
                 raise ValueError("invalid default role")
             if not self.get(default_role):
                 raise ValueError("default role does not exist")
+        # Older clients may omit the field; preserve the previous image model.
+        with self._db() as db:
+            prior = db.execute("SELECT value FROM options WHERE key='chat_image_profile'").fetchone()
+        chat_image_profile = raw.get("chat_image_profile", prior[0] if prior else "default")
+        if not isinstance(chat_image_profile, str) or len(chat_image_profile) > 64:
+            raise ValueError("invalid chat image profile")
+        if (allowed_image_profiles is not None
+                and chat_image_profile not in allowed_image_profiles):
+            raise ValueError("chat image profile is not configured")
         with self._db() as db:
             db.executemany("INSERT OR REPLACE INTO options VALUES(?,?)", [
                 ("user_name", name), ("user_description", description),
-                ("default_role", default_role)])
+                ("default_role", default_role),
+                ("chat_image_profile", chat_image_profile)])
         return {"user_name": name, "user_description": description,
-                "default_role": default_role}
+                "default_role": default_role, "chat_image_profile": chat_image_profile}
+
+    def chat_image_profile(self) -> str:
+        """Current global image preference; never returns a user file path."""
+        with self._db() as db:
+            row = db.execute("SELECT value FROM options WHERE key='chat_image_profile'").fetchone()
+        return row[0] if row else "default"
 
     def assigned_card(self, session: str) -> dict | None:
         if not isinstance(session, str) or not SESSION_ID.fullmatch(session):
