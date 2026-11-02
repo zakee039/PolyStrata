@@ -79,6 +79,28 @@ class Command(unittest.TestCase):
             "--sigmas", "1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568,0.0",
             "-s", "42", "-o", "o/img_%d.png", "--diffusion-fa", "--vae-tiling"])
 
+    def test_qwen_official_encoder_and_weak_reference_flags(self):
+        import base64, io
+        from PIL import Image
+        cfg = {"family": "qwen_turbo", "exe":"sd-cli", "diffusion_model":"turbo.gguf",
+               "vae":"vae.safetensors", "llm":"Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+               "llm_vision":"mmproj-Qwen3VL-8B-Instruct-F16.gguf"}
+        img=Image.new("RGB",(64,64),(9,100,150))
+        buf=io.BytesIO();img.save(buf,format="PNG")
+        encoded='data:image/png;base64,'+base64.b64encode(buf.getvalue()).decode()
+        job=images_api.parse_request({"prompt":"Festival coat", "size":"512x512", "steps":8,
+               "strata_reference_image":encoded},cfg)
+        job.update({"init_image_path":"character.png", "character_weak_reference":True})
+        cmd=images_api.sd_cli_args(cfg,job,"output.png")
+        self.assertEqual(cmd[cmd.index("--ref-image")+1],"character.png")
+        self.assertEqual(cmd[cmd.index("--llm_vision")+1],cfg["llm_vision"])
+        self.assertEqual(cmd[cmd.index("--img-cfg-scale")+1],"0.7")
+        self.assertNotIn("--init-img",cmd)
+        self.assertIn("--sigmas",cmd)
+        cfg_no_vision=dict(cfg);cfg_no_vision.pop("llm_vision")
+        with self.assertRaises(images_api.ImageRequestError):
+            images_api.parse_request({"prompt":"cat","strata_reference_image":encoded},cfg_no_vision)
+
     def test_sdxl_checkpoint_arguments_and_defaults(self):
         cfg = {"exe": "sd-cli", "family": "sdxl", "checkpoint": "animagine.safetensors",
                "model_name": "Animagine XL 4.0 Opt", "steps": 28, "cfg_scale": 7.0,
@@ -309,6 +331,23 @@ class OverHttp(unittest.TestCase):
         except urllib.error.HTTPError as e:
             with e:
                 return e.code, e.read(), None
+
+    def test_named_official_default_profile_alias(self):
+        self.svc.images.cfg["profile_id"] = "qwen-image-2.1-turbo-official"
+        mmproj = Path(self.tmp.name) / "mock-mmproj.gguf"
+        mmproj.write_bytes(b"mock projector")
+        self.svc.images.cfg["llm_vision"] = str(mmproj)
+        code, payload, _ = self.get("/v1/mikuchin/image-models")
+        self.assertEqual(code, 200)
+        result = json.loads(payload)["models"]
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["id"], "qwen-image-2.1-turbo-official")
+        self.assertEqual(result[0]["reference_mode"], "qwen_edit")
+        for name in ("default", "qwen-image-2.1-turbo-official"):
+            code, result = self.post({"prompt":"a paper bird", "size":"512x512",
+                                      "strata_image_profile":name})
+            self.assertEqual(code, 200, result)
+            self.assertEqual(result["strata"]["image_profile"], name)
 
     def test_page_only_profiles_and_chat_default(self):
         checkpoint = Path(self.tmp.name) / "animagine.safetensors"

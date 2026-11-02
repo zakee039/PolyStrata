@@ -112,7 +112,8 @@ def parse_request(req: dict, cfg: dict) -> dict:
     reference = req.get("strata_reference_image")
     strength = req.get("strata_denoise_strength", 0.65)
     if reference is not None:
-        if cfg.get("family") != "sdxl":
+        family = cfg.get("family") or "qwen_turbo"
+        if family != "sdxl" and not (family == "qwen_turbo" and cfg.get("llm_vision")):
             raise ImageRequestError("selected image model does not support direct reference images")
         if not isinstance(reference, str) or len(reference) > 7_200_000:
             raise ImageRequestError("reference image must be a PNG, JPEG or WebP data URL up to 5 MB")
@@ -169,6 +170,8 @@ def sd_cli_args(cfg: dict, job: dict, out_pattern: str) -> list[str]:
     else:
         cmd += ["--diffusion-model", str(cfg["diffusion_model"]),
                 "--vae", str(cfg["vae"]), "--llm", str(cfg["llm"])]
+        if cfg.get("llm_vision"):
+            cmd += ["--llm_vision", str(cfg["llm_vision"])]
     cmd += ["-p", job["prompt"], "--steps", str(job["steps"]),
             "--cfg-scale", str(cfg.get("cfg_scale", 7.0 if family == "sdxl" else 1.0)),
             "--sampling-method", str(cfg.get("sampler", "euler")),
@@ -177,10 +180,17 @@ def sd_cli_args(cfg: dict, job: dict, out_pattern: str) -> list[str]:
     if negative:
         cmd += ["--negative-prompt", str(negative)]
     if job.get("init_image_path"):
-        if family != "sdxl":
-            raise ImageRequestError("direct reference images require SDXL")
-        cmd += ["--init-img", job["init_image_path"],
-                "--strength", str(job.get("denoise_strength") or 0.65)]
+        if family == "sdxl":
+            cmd += ["--init-img", job["init_image_path"],
+                    "--strength", str(job.get("denoise_strength") or 0.65)]
+        elif family == "qwen_turbo" and cfg.get("llm_vision"):
+            cmd += ["--ref-image", job["init_image_path"]]
+            if job.get("character_weak_reference"):
+                # The role image contributes appearance only; explicit user
+                # intent in the text prompt takes precedence.
+                cmd += ["--img-cfg-scale", str(cfg.get("character_img_cfg_scale", 0.7))]
+        else:
+            raise ImageRequestError("direct reference images are unavailable for this image model")
     if family == "qwen_turbo" and job["steps"] == TURBO_STEPS:
         cmd += ["--sigmas", str(cfg.get("sigmas") or TURBO_SIGMAS)]
     cmd += ["-s", str(job["seed"])]
@@ -221,7 +231,7 @@ def need_mib(cfg: dict, width: int, height: int) -> int:
     if cfg.get("need_mib"):
         return int(cfg["need_mib"])
     files = 0
-    keys = ("checkpoint",) if cfg.get("family") == "sdxl" else ("diffusion_model", "vae", "llm")
+    keys = ("checkpoint",) if cfg.get("family") == "sdxl" else ("diffusion_model", "vae", "llm", "llm_vision")
     for k in keys:
         try:
             files += Path(cfg[k]).stat().st_size
@@ -263,6 +273,8 @@ class ImageGen:
 
     def missing(self) -> list[str]:
         required = ("exe", "checkpoint") if self.family == "sdxl" else ("exe", "diffusion_model", "vae", "llm")
+        if self.family == "qwen_turbo" and self.cfg.get("llm_vision"):
+            required += ("llm_vision",)
         return [self.cfg[k] for k in required if not Path(self.cfg[k]).is_file()]
 
     def _say(self, text: str) -> None:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from serve import images as images_api
@@ -32,6 +33,10 @@ SCHEMA = {
                         "description": "Default auto. Anime pictures get 4x upscaling; off disables it."},
             "style_hint": {"type": "string", "enum": ["auto", "anime", "other"],
                            "description": "Anime only when clearly an anime/2D Japanese animation style."},
+            "character_related": {"type": "boolean", "description": (
+                "Set true only when the image subject is the chat's assigned character. "
+                "Never apply the character reference image to unrelated image subjects. "
+                "Follow the user's latest and earlier instructions above the reference image.")},
         },
         "required": ["prompt"],
     },
@@ -41,8 +46,21 @@ SCHEMA = {
 class ChatImageHub:
     """MCP-compatible adapter so image tools join, not replace, existing MCP."""
 
-    def __init__(self, svc, mcp=None):
+    def __init__(self, svc, mcp=None, *, session_id=None, stateless=False):
         self.svc, self.mcp = svc, mcp
+        self.character_name = None
+        self.character_reference = None
+        # Reference images are server-owned, never inferred from client paths.
+        # No character identity or image in the stateless/ordinary assistant.
+        if not stateless and session_id and getattr(svc, "session_v1", None) is not None:
+            from serve.character_cards import CharacterStore
+            cards = CharacterStore(svc.session_v1.root)
+            card = cards.assigned_card(session_id)
+            if card and card.get("reference_image"):
+                file = cards.image_file(card["id"])
+                if file and file.stat().st_size <= 5 * 1024 * 1024:
+                    self.character_name = card["name"]
+                    self.character_reference = file
         self.settings = {**(mcp.settings if mcp else {}), "max_rounds":
                          int((mcp.settings if mcp else {}).get("max_rounds", 8))}
         self.builtin = SimpleNamespace(name="PolyStrata", status="ready")
@@ -61,7 +79,12 @@ class ChatImageHub:
         tools = list(self.mcp.template_tools(exclude=exclude)) if self.mcp else []
         if self.svc.images is not None and NAME not in exclude:
             tools = [tool for tool in tools if tool.get("name") != NAME]
-            tools.append(SCHEMA)
+            if self.character_reference is not None and self.svc.images.cfg.get("llm_vision"):
+                tool = {**SCHEMA, "description": SCHEMA["description"] +
+                        f" The current chat character is {self.character_name!r}, and a weak appearance reference is available."}
+            else:
+                tool = SCHEMA
+            tools.append(tool)
         return tools
 
     def call(self, name, arguments, cancel: threading.Event | None = None):
@@ -74,12 +97,27 @@ class ChatImageHub:
                 raise ValueError("image generation is not enabled")
             if not isinstance(arguments, dict):
                 raise ValueError("expected image arguments as an object")
-            job = images_api.parse_request({
+            request = {
                 "prompt": arguments.get("prompt"), "size": arguments.get("size") or "768x768",
                 "n": 1, "response_format": "url",
                 "strata_upscale": arguments.get("upscale") or "auto",
                 "strata_style_hint": arguments.get("style_hint") or "auto",
-            }, self.svc.images.cfg)
+            }
+            character_related = arguments.get("character_related") is True
+            if character_related and self.character_reference is not None and self.svc.images.cfg.get("llm_vision"):
+                import base64
+                # Weak reference: never overwrite explicit scene, costume, pose,
+                # calendar/holiday or subject instructions from the conversation.
+                request["prompt"] = (str(arguments.get("prompt") or "") +
+                    "\nReference photo is for this character's visual identity only. "
+                    "Treat the text request as authoritative for the subject, "
+                    "scene, holiday, outfit, colors, actions, pose, composition and "
+                    "any conflicting details. Never copy unrelated scene or attire from the reference.")
+                request["strata_reference_image"] = ("data:image/png;base64," +
+                    base64.b64encode(self.character_reference.read_bytes()).decode("ascii"))
+            job = images_api.parse_request(request, self.svc.images.cfg)
+            if "strata_reference_image" in request:
+                job["character_weak_reference"] = True
             if cancel and cancel.is_set():
                 raise RuntimeError("image generation cancelled")
             gen = self.svc.images
@@ -93,7 +131,8 @@ class ChatImageHub:
                 figures.update(up)
             filename = gen.store(images[0])
             output["image_file"] = filename
-            output["image_prompt"] = job["prompt"]
+            output["image_prompt"] = str(arguments.get("prompt") or "")
+            output["character_reference_used"] = bool(job.get("character_weak_reference"))
             if figures.get("upscale_original_files"):
                 output["image_original_file"] = figures["upscale_original_files"][0]
             output["upscale_applied"] = figures.get("upscale_applied", False)

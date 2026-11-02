@@ -3,6 +3,12 @@ import contextlib
 import threading
 import types
 import unittest
+import tempfile
+import base64
+import io
+from pathlib import Path
+from PIL import Image
+from serve.character_cards import CharacterStore
 from unittest.mock import patch
 
 from serve.image_tools import ChatImageHub, NAME
@@ -59,6 +65,44 @@ class ChatImageToolTests(unittest.TestCase):
         self.assertEqual(seen, [("enter", 512, 512), ("leave", 512, 512)])
         self.assertEqual(len(svc.images.calls), 1)
         self.assertNotIn("b64_json", result)
+
+    def test_role_weak_reference_only_when_character_related(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CharacterStore(tmp)
+            card = store.save({"name": "Miku", "description": "teal twin tails"})
+            buf = io.BytesIO();Image.new("RGB",(64,64),(35,180,190)).save(buf,"PNG")
+            store.upload_reference(card["id"],base64.b64encode(buf.getvalue()).decode())
+            store.assign("chat_sess1",card["id"])
+            svc=self.make_service()
+            svc.session_v1=types.SimpleNamespace(root=Path(tmp))
+            svc.images.cfg["llm_vision"]="test-mmproj.gguf"
+            @contextlib.contextmanager
+            def mocked_turn(svc_arg, gen, job, cancel):
+                yield "unload"
+            with patch("serve.image_tools.images_api.gpu_turn",mocked_turn):
+                hub=ChatImageHub(svc,session_id="chat_sess1")
+                self.assertIsNotNone(hub.character_reference)
+                output=hub.call(NAME,{"prompt":"Miku at a winter festival wearing a coat", "size":"512x512", "character_related":True})
+                self.assertTrue(output["ok"],output)
+                self.assertTrue(output["character_reference_used"])
+                self.assertEqual(output["image_prompt"],"Miku at a winter festival wearing a coat")
+                job=svc.images.calls[-1]
+                self.assertTrue(job["reference_png"].startswith(b"\x89PNG"))
+                self.assertIn("winter festival",job["prompt"])
+                self.assertIn("outfit",job["prompt"])
+                self.assertIn("authoritative",job["prompt"])
+                output=hub.call(NAME,{"prompt":"a landscape painting","character_related":False})
+                self.assertTrue(output["ok"],output)
+                self.assertFalse(output["character_reference_used"])
+                self.assertIsNone(svc.images.calls[-1]["reference_png"])
+                hub_stateless=ChatImageHub(svc,session_id="chat_sess1",stateless=True)
+                self.assertIsNone(hub_stateless.character_reference)
+                result=hub_stateless.call(NAME,{"prompt":"Miku at festival","character_related":True})
+                self.assertTrue(result["ok"])
+                self.assertFalse(result["character_reference_used"])
+                store.assign("chat_sess1","ordinary")
+                hub_ordinary=ChatImageHub(svc,session_id="chat_sess1")
+                self.assertIsNone(hub_ordinary.character_reference)
 
     def test_bad_request_fails_without_invoking_generator(self):
         svc = self.make_service()

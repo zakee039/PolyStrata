@@ -6098,8 +6098,9 @@ def make_handler(svc: Service):
                             "available": not gen.missing(),
                             "steps": int(gen.cfg.get("steps") or (28 if gen.family == "sdxl" else 8)),
                             "max_side": int(gen.cfg.get("max_side") or 2048),
-                            "reference_mode": "img2img" if gen.family == "sdxl" else "none"}
-                available = [image_model_info("default", svc.images)]
+                            "reference_mode": ("img2img" if gen.family == "sdxl" else
+                                               "qwen_edit" if gen.cfg.get("llm_vision") else "none")}
+                available = [image_model_info(svc.images.cfg.get("profile_id") or "default", svc.images)]
                 available += [image_model_info(ident, gen) for ident, gen in svc.image_profiles.items()]
                 self._json(200, {"models": available})
                 return
@@ -6610,7 +6611,7 @@ def make_handler(svc: Service):
             profile_id = req.get("strata_image_profile", "default")
             if not isinstance(profile_id, str) or len(profile_id) > 64:
                 raise images_api.ImageRequestError("strata_image_profile: invalid model id")
-            if profile_id != "default":
+            if profile_id not in ("default", svc.images.cfg.get("profile_id") or "default"):
                 gen = svc.image_profiles.get(profile_id)
                 if gen is None:
                     raise images_api.ImageRequestError("strata_image_profile: model not found")
@@ -6938,7 +6939,8 @@ def make_handler(svc: Service):
                 if use_external_mcp:
                     svc.mcp.wait(10)                               # servers still starting (only right after start)
                 from serve.image_tools import ChatImageHub
-                hub = ChatImageHub(svc, svc.mcp if use_external_mcp else None)
+                hub = ChatImageHub(svc, svc.mcp if use_external_mcp else None,
+                                   session_id=session_id, stateless=stateless)
                 extra = hub.template_tools(exclude=own)            # the request's own tools win a name clash
                 use_mcp = bool(extra)
                 tools = (tools or []) + extra or None
