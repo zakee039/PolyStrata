@@ -310,6 +310,14 @@ class ImageGen:
                                             stdin=subprocess.DEVNULL, env=image_env(self.cfg),
                                             cwd=str(work), text=True, errors="replace", bufsize=1)
                 except OSError as e:
+                    # A reference may already be materialized when launching
+                    # the subprocess fails. Do not leave it behind on disk.
+                    lf.close()
+                    for stale in (work / "reference.png", logf):
+                        with contextlib.suppress(OSError):
+                            stale.unlink()
+                    with contextlib.suppress(OSError):
+                        work.rmdir()
                     raise ImageJobFailed(f"sd-cli did not start ({cmd[0]}): {e}") from e
                 try:
                     from serve.winjob import contain
