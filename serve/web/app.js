@@ -733,7 +733,10 @@ function swipeLoad(m) {
 async function streamInto(m, el, signal) {
   const assembledMessages = apiMessages();
   const roleSystem = await window.polyCharacterPrompt?.(assembledMessages);
-  if (roleSystem) assembledMessages.unshift(roleSystem);
+  const workflowInitPending = roleSystem?.workflowInitPending === true;
+  const workflowSessionId = sessionId;
+  // Workflow bookkeeping is never part of OpenAI-compatible message JSON.
+  if (roleSystem) assembledMessages.unshift({role: roleSystem.role, content: roleSystem.content});
   const body = {model: health.model, messages: assembledMessages, stream: true, reasoning_effort: settings.thinking};
   if (!(settings.temperature > 0)) {
     body.temperature = 0;
@@ -816,6 +819,9 @@ async function streamInto(m, el, signal) {
   const ran = (m.tools || []).filter((t) => t.state === "done" || t.state === "error").length;
   if (ran) m.meta = `${m.meta ? `${m.meta} · ` : ""}${ran} tool call${ran > 1 ? "s" : ""}`;
   if (m.limit) m.meta = `${m.meta || ""} · stopped at the limit of ${m.limit} tool rounds (mcp.max_rounds)`;
+  // A failed/aborted first answer remains uninitialized, so retry can run it.
+  if (workflowInitPending && !m.stopped && m.text?.trim() && workflowSessionId)
+    await window.polyWorkflowCommit?.(workflowSessionId);
   updateAssistant(el, m, false);
 }
 

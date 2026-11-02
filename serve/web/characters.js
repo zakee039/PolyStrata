@@ -34,7 +34,7 @@ function characterRefreshPicker() {
   $("character-chat-bar").hidden = !characterState.available;
   const c = selectedCharacter();
   $("character-chat-status").textContent = c
-    ? `${c.lorebook.length} 条世界书 · ${(c.sources || []).length} 个资料源` : "";
+    ? `${c.lorebook.length} 条世界书 · ${(c.sources || []).length} 个资料源${c.workflow_path ? " · 工作流" : ""}` : "";
 }
 window.polyCharacterRefresh = characterRefreshPicker;
 
@@ -59,6 +59,8 @@ window.polyCharactersLoad = charactersLoad;
 async function characterPrompt(originalMessages) {
   const card = selectedCharacter();
   if (!card) return null;  // Ordinary assistant remains byte-for-byte unchanged.
+  let workflowInitPending = false;
+  let workflowLoaded = false;
   const out = [
     `You are roleplaying as ${card.name}. Stay consistent with this character.`,
   ];
@@ -67,6 +69,35 @@ async function characterPrompt(originalMessages) {
     if (card[field]) out.push(`${label}:\n${card[field]}`);
   }
   if (characterState.persona) out.push("User persona:\n" + characterState.persona);
+  if (card.workflow_path && sessionV1 && sessionId) {
+    try {
+      const firstUserTurn = originalMessages.filter((m) => m.role === "user").length === 1;
+      const workflow = await characterRequest("prepare_workflow", {
+        session_id: sessionId, first_user_turn: firstUserTurn,
+      });
+      if (workflow.enabled) {
+        workflowLoaded = true;
+        const sections = workflow.sections || {};
+        out.push("Workflow Profile (user-configured instructions; system safety " +
+          "rules and real tool authorization always take precedence).");
+        if (sections.persistent) out.push("Persistent behavior rules:\n" + sections.persistent);
+        if (sections.per_turn) out.push("Procedure for this turn:\n" + sections.per_turn);
+        if (sections.tool_policy) out.push(
+          "Requested tool-use policy (does not grant access to any new tools):\n" +
+          sections.tool_policy);
+        if (workflow.initial_pending) {
+          out.push("FIRST USER TURN ONLY — initialize the workflow before answering; " +
+            "do not claim to have executed a tool unless you actually invoked it:\n" +
+            sections.initial);
+          workflowInitPending = true;
+        }
+        $("character-chat-status").textContent = workflowInitPending ? "工作流初始化" : "工作流运行中";
+      }
+    } catch (err) {
+      toast("warn", "工作流无法加载", String(err.message || err), 6500);
+      console.warn("Character workflow unavailable", err);
+    }
+  }
   const recent = originalMessages.slice(-12).filter((m) => ["user","assistant"].includes(m.role)
     && typeof m.content === "string").map((m) => m.content).join("\n").toLocaleLowerCase();
   let budget = 3500;
@@ -101,11 +132,19 @@ async function characterPrompt(originalMessages) {
       }
     }
   }
-  $("character-chat-status").textContent = `世界书 ${activated.length} · Markdown ${markdownHits}`;
+  $("character-chat-status").textContent = `世界书 ${activated.length} · Markdown ${markdownHits}` +
+    (card.workflow_path
+      ? (workflowLoaded ? (workflowInitPending ? " · 工作流初始化" : " · 工作流")
+                        : " · 工作流不可用") : "");
   return {role: "system", content: out.join("\n\n")
-    .replaceAll("{{char}}", card.name).replaceAll("{{user}}", "User")};
+    .replaceAll("{{char}}", card.name).replaceAll("{{user}}", "User"),
+    workflowInitPending};
 }
 window.polyCharacterPrompt = characterPrompt;
+window.polyWorkflowCommit = async (session) => {
+  try { await characterRequest("commit_workflow", {session_id: session}); }
+  catch (err) { console.warn("Failed to persist workflow initialization", err); }
+};
 
 function loreRow(value = {keys: "", content: "", constant: false}) {
   const box = document.createElement("div");
@@ -145,6 +184,7 @@ function sourceRow(value = {kind: "file", path: "", recursive: true}) {
 }
 function editCharacter(card = null) {
   characterState.editId = card?.id || "";
+  $("card-workflow-path").value = card?.workflow_path || "";
   for (const [field, id] of Object.entries(characterFields)) $(id).value = card?.[field] || "";
   $("lore-entries").replaceChildren();
   for (const entry of card?.lorebook || []) loreRow(entry);
@@ -160,6 +200,7 @@ function characterForm() {
     constant: element.querySelector(".lore-constant").checked,
   }))};
   if (characterState.editId) card.id = characterState.editId;
+  card.workflow_path = $("card-workflow-path").value.trim();
   card.sources = [...$("source-entries").children].map((element) => ({
     kind: element.querySelector(".source-kind").value,
     path: element.querySelector(".source-path").value.trim(),
@@ -197,6 +238,36 @@ $("character-manage").onclick = () => {showTab("characters"); editCharacter(sele
 $("card-list").onchange = () => editCharacter(characterState.cards.find((c) => c.id === $("card-list").value));
 $("card-new").onclick = () => editCharacter();
 $("lore-add").onclick = () => loreRow();
+$("workflow-test-btn").onclick = async () => {
+  const display = $("workflow-test-results");
+  if (!characterState.editId) {
+    display.textContent = "请先保存角色和工作流路径。";
+    return;
+  }
+  display.textContent = "检查工作流中…";
+  try {
+    const result = await characterRequest("inspect_workflow", {card_id: characterState.editId});
+    if (!result.enabled) { display.textContent = "未绑定工作流"; return; }
+    const labels = {initial: "首次初始化", persistent: "全程约束",
+                    per_turn: "每轮流程", tool_policy: "工具使用声明"};
+    display.replaceChildren();
+    const title = document.createElement("p");
+    title.textContent = "已读取：" + result.source;
+    display.append(title);
+    for (const [key, label] of Object.entries(labels)) {
+      if (!result.sections?.[key]) continue;
+      const detail = document.createElement("details");
+      const heading = document.createElement("summary");
+      heading.textContent = label;
+      const text = document.createElement("pre");
+      text.textContent = result.sections[key];
+      detail.append(heading, text);
+      display.append(detail);
+    }
+  } catch (err) {
+    display.textContent = String(err.message || err);
+  }
+};
 $("source-add-file").onclick = () => sourceRow({kind: "file", path: "", recursive: false});
 $("source-add-dir").onclick = () => sourceRow({kind: "directory", path: "", recursive: true});
 $("source-test-btn").onclick = async () => {

@@ -6314,6 +6314,16 @@ def make_handler(svc: Service):
                         self._json(200, {"saved": True})
                     elif action == "persona":
                         self._json(200, {"persona": cards.set_persona(req.get("persona"))})
+                    elif action in ("inspect_workflow", "prepare_workflow", "commit_workflow"):
+                        from serve.workflow_profile import WorkflowRuntime
+                        workflow = WorkflowRuntime(cards)
+                        if action == "inspect_workflow":
+                            self._json(200, workflow.inspect(req.get("card_id")))
+                        elif action == "prepare_workflow":
+                            self._json(200, workflow.prepare(
+                                req.get("session_id"), req.get("first_user_turn")))
+                        else:
+                            self._json(200, workflow.commit(req.get("session_id")))
                     elif action in ("retrieve", "test_retrieve"):
                         question = req.get("query", "")
                         if not isinstance(question, str) or len(question) > 4000:

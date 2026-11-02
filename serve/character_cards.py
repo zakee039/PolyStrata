@@ -70,6 +70,8 @@ def valid_card(data: object) -> dict:
             raise ValueError("source recursive must be boolean")
         sources.append({"kind": item["kind"], "path": path, "recursive": recursive})
     card["sources"] = sources
+    workflow_path = _text(data.get("workflow_path", ""), 1024, "workflow path")
+    card["workflow_path"] = workflow_path
     if len(json.dumps(card, ensure_ascii=False).encode("utf-8")) > MAX_JSON_BYTES:
         raise ValueError("card is too large")
     return card
@@ -120,6 +122,10 @@ class CharacterStore:
             db.execute("CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS options (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS assignments (session_id TEXT PRIMARY KEY, card_id TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS workflow_sessions ("
+                       "session_id TEXT NOT NULL, card_id TEXT NOT NULL, "
+                       "snapshot TEXT NOT NULL, initialized INTEGER NOT NULL DEFAULT 0, "
+                       "PRIMARY KEY (session_id, card_id))")
 
     @contextmanager
     def _db(self):
@@ -156,6 +162,7 @@ class CharacterStore:
         with self._db() as db:
             db.execute("DELETE FROM cards WHERE id=?", (ident,))
             db.execute("DELETE FROM assignments WHERE card_id=?", (ident,))
+            db.execute("DELETE FROM workflow_sessions WHERE card_id=?", (ident,))
 
     def assign(self, session: str, ident: str | None) -> None:
         if not isinstance(session, str) or not SESSION_ID.fullmatch(session):

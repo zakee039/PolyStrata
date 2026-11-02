@@ -108,6 +108,15 @@
         <label>场景设定<textarea class="st-input" id="card-scenario" rows="2" maxlength="4000"></textarea></label>
         <label>开场白<textarea class="st-input" id="card-greeting" rows="2" maxlength="3000"></textarea></label>
         <label>对话示例（可选）<textarea class="st-input" id="card-examples" rows="2" maxlength="4000" placeholder="{{user}}: 你好&#10;{{char}}: 你好呀！"></textarea></label>
+        <label>工作流 Markdown（可选）
+          <input class="st-input" id="card-workflow-path" maxlength="1024"
+            placeholder="本机绝对路径，例如 C:\Users\…\OneDrive\workflows\nlp_teacher.md">
+        </label>
+        <div class="workflow-editor-row">
+          <span class="muted small">绑定到当前角色；新会话的第一条用户消息初始化，后续持续遵守规则。</span>
+          <button type="button" class="st-btn st-btn--secondary" id="workflow-test-btn">检查工作流</button>
+        </div>
+        <div id="workflow-test-results" class="source-test-results" aria-live="polite"></div>
         <div class="character-lore-head"><strong>世界书</strong><span class="muted small">最近对话命中关键词时插入</span><button type="button" class="st-btn st-btn--secondary" id="lore-add">＋ 条目</button></div>
         <div id="lore-entries" class="lore-entries"></div>
         <div class="character-lore-head"><strong>Markdown 资料</strong><span class="muted small">读取服务器本机路径，文件保留在原位置</span>

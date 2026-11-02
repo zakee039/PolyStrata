@@ -22,6 +22,8 @@
 .lore-entry-head .lore-key{flex:1;min-width:80px}
 .lore-always{white-space:nowrap;display:flex;align-items:center;gap:4px;font-size:12px}
 .lore-constant{accent-color:var(--st-accent)}
+.workflow-editor-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.workflow-editor-row .st-btn{flex:0 0 auto}
 .source-entry{padding:10px;border:1px solid var(--st-border);border-radius:12px}
 .source-entry-row,.source-test-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .source-entry-row .source-path,.source-test-row .st-input{min-width:150px;flex:1}
