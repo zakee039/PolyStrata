@@ -39,6 +39,28 @@ class CharacterTests(unittest.TestCase):
                     "first_mes", "mes_example", "lorebook"):
             self.assertEqual(imported[key], x[key], key)
 
+    def test_worldbook_and_workflow_are_scoped_to_each_character(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = CharacterStore(tmp)
+            a = db.save({"name": "Character A",
+                         "lorebook": [{"keys": "alpha", "content": "A-only", "constant": False}],
+                         "sources": [{"kind": "directory", "path": tmp + "/a", "recursive": True}],
+                         "workflow_path": tmp + "/a-workflow.md"})
+            b = db.save({"name": "Character B",
+                         "lorebook": [{"keys": "beta", "content": "B-only", "constant": False}],
+                         "sources": [{"kind": "file", "path": tmp + "/b.md", "recursive": False}],
+                         "workflow_path": tmp + "/b-workflow.md"})
+            db.assign("chat_a", a["id"])
+            db.assign("chat_b", b["id"])
+            self.assertEqual(db.assigned_card("chat_a")["lorebook"][0]["content"], "A-only")
+            self.assertEqual(db.assigned_card("chat_a")["workflow_path"], tmp + "/a-workflow.md")
+            self.assertEqual(db.assigned_card("chat_b")["lorebook"][0]["content"], "B-only")
+            self.assertEqual(db.assigned_card("chat_b")["sources"][0]["kind"], "file")
+            self.assertEqual(db.assigned_card("chat_b")["workflow_path"], tmp + "/b-workflow.md")
+            a["lorebook"][0]["content"] = "A-updated"
+            db.save(a)
+            self.assertEqual(db.get(b["id"])["lorebook"][0]["content"], "B-only")
+
     def test_import_v3(self):
         data = {"spec": "chara_card_v3", "data": {"name": "Tester",
             "description": "a", "character_book": {"entries": [

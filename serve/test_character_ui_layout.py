@@ -63,6 +63,11 @@ class CharacterLayoutTests(unittest.TestCase):
         self.assertIn('id="i-character"', self.sprite)
         self.assertIn('href="web/sprite.svg#i-character"', self.html)
 
+    def test_scrollbar_space_and_scope_hint(self):
+        css = (ROOT / "app.css").read_text(encoding="utf8")
+        self.assertIn(".view--characters{overflow-y:auto;scrollbar-gutter:stable}", css)
+        self.assertIn("每个角色独立保存世界书与工作流；Persona 全局共享", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()

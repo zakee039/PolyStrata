@@ -5,7 +5,7 @@
 .character-chat-bar .st-input{min-width:100px;max-width:245px;height:32px;font-size:12px}
 .character-chat-bar .st-btn{height:32px;padding:5px 12px}
 .character-chat-status{font-size:11px;color:var(--st-ink-muted)}
-.view--characters{overflow-y:auto}
+.view--characters{overflow-y:auto;scrollbar-gutter:stable}
 .character-editor{width:min(830px,100%);margin:0 auto;padding:22px 26px 52px}
 .character-editor-head{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:16px}
 .character-editor-head>strong{font-size:18px;flex:1 1 160px}
