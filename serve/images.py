@@ -101,7 +101,7 @@ def parse_request(req: dict, cfg: dict) -> dict:
         raise ImageRequestError("output_format: only png")
     w, h = parse_size(req.get("size"), int(cfg.get("max_side") or 2048))
     n = _int_field(req, "n", 1, int(cfg.get("max_n") or 4), 1)
-    steps = _int_field(req, "steps", 1, 100, int(cfg.get("steps") or TURBO_STEPS))
+    steps = _int_field(req, "steps", 1, 100, int(cfg.get("steps") or (28 if cfg.get("family") == "sdxl" else TURBO_STEPS)))
     seed = _int_field(req, "seed", 0, 2**62, None)
     if seed is None:
         seed = random.SystemRandom().randrange(0, 2**31)
@@ -123,12 +123,22 @@ def postprocess(gen, images: list[bytes], job: dict, cancel: threading.Event | N
 def sd_cli_args(cfg: dict, job: dict, out_pattern: str) -> list[str]:
     """The sd-cli command for one job: the model card's stable-diffusion.cpp command (8 steps, CFG 1, euler, Turbo's
     sigmas, --diffusion-fa from the config's args), the size, seed and batch count, and the config's other args."""
-    cmd = [str(cfg["exe"]),
-           "--diffusion-model", str(cfg["diffusion_model"]), "--vae", str(cfg["vae"]), "--llm", str(cfg["llm"]),
-           "-p", job["prompt"],
-           "--steps", str(job["steps"]), "--cfg-scale", "1.0", "--sampling-method", "euler",
-           "-W", str(job["width"]), "-H", str(job["height"])]
-    if job["steps"] == TURBO_STEPS:
+    family = cfg.get("family") or "qwen_turbo"
+    cmd = [str(cfg["exe"])]
+    if family == "sdxl":
+        # A standalone SDXL checkpoint contains UNet, CLIP-L/G and VAE.
+        # It must not load the Qwen text encoder or Qwen Turbo sigmas.
+        cmd += ["--model", str(cfg["checkpoint"])]
+    else:
+        cmd += ["--diffusion-model", str(cfg["diffusion_model"]),
+                "--vae", str(cfg["vae"]), "--llm", str(cfg["llm"])]
+    cmd += ["-p", job["prompt"], "--steps", str(job["steps"]),
+            "--cfg-scale", str(cfg.get("cfg_scale", 7.0 if family == "sdxl" else 1.0)),
+            "--sampling-method", str(cfg.get("sampler", "euler")),
+            "-W", str(job["width"]), "-H", str(job["height"])]
+    if family == "sdxl" and cfg.get("negative_prompt"):
+        cmd += ["--negative-prompt", str(cfg["negative_prompt"])]
+    if family == "qwen_turbo" and job["steps"] == TURBO_STEPS:
         cmd += ["--sigmas", str(cfg.get("sigmas") or TURBO_SIGMAS)]
     cmd += ["-s", str(job["seed"])]
     if job["n"] > 1:
@@ -168,7 +178,8 @@ def need_mib(cfg: dict, width: int, height: int) -> int:
     if cfg.get("need_mib"):
         return int(cfg["need_mib"])
     files = 0
-    for k in ("diffusion_model", "vae", "llm"):
+    keys = ("checkpoint",) if cfg.get("family") == "sdxl" else ("diffusion_model", "vae", "llm")
+    for k in keys:
         try:
             files += Path(cfg[k]).stat().st_size
         except (OSError, KeyError, TypeError):
@@ -188,7 +199,11 @@ class ImageGen:
         reload = self.cfg.get("reload") or "lazy"
         if reload not in ("lazy", "eager"):
             raise ValueError(f'images "reload" must be lazy or eager, not {reload!r}')
-        for k in ("exe", "diffusion_model", "vae", "llm"):
+        self.family = self.cfg.get("family") or "qwen_turbo"
+        if self.family not in ("qwen_turbo", "sdxl"):
+            raise ValueError(f'unsupported image model family {self.family!r}')
+        required = ("exe", "checkpoint") if self.family == "sdxl" else ("exe", "diffusion_model", "vae", "llm")
+        for k in required:
             if not isinstance(self.cfg.get(k), str) or not self.cfg[k]:
                 raise ValueError(f'the config\'s "images" section needs "{k}" (run setup with --images again)')
         self.policy, self.reload = policy, reload
@@ -204,7 +219,8 @@ class ImageGen:
         self.progress = None                       # (step, steps) of the running job
 
     def missing(self) -> list[str]:
-        return [self.cfg[k] for k in ("exe", "diffusion_model", "vae", "llm") if not Path(self.cfg[k]).exists()]
+        required = ("exe", "checkpoint") if self.family == "sdxl" else ("exe", "diffusion_model", "vae", "llm")
+        return [self.cfg[k] for k in required if not Path(self.cfg[k]).is_file()]
 
     def _say(self, text: str) -> None:
         print(f"[strata] {text}", flush=True)

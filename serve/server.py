@@ -3311,7 +3311,8 @@ class Service:
         self.models_root = ROOT                          # where the installation's run configs are (serve/models.py)
         # "memory_debug": true in the config (or $STRATA_MEMORY_DEBUG): a switch prints the free VRAM around it
         self.memory_debug = bool(os.environ.get("STRATA_MEMORY_DEBUG"))
-        self.images = None                                # serve/images.py's ImageGen when the config has "images"
+        self.images = None                                # existing default for chat tool + image API
+        self.image_profiles = {}                          # page-only named image presets; chat never reads these
         self.restore_after_load = None                    # a session file an image job saved before it unloaded
         # #37: the command line's options for every model: model_settings()'s overrides, and the keys main() writes
         # into each run config before its engine starts (gpu, replicas)
@@ -6088,6 +6089,17 @@ def make_handler(svc: Service):
             if path == "/v1/mikuchin/ui-language" and MIKUCHIN_LANGUAGE_FILE:
                 self._json(200, {"language": mikuchin_language()})
                 return
+            if path == "/v1/mikuchin/image-models":
+                if not self._authorized():return
+                if not svc.images:
+                    self._json(200, {"models": []});return
+                available = [{"id": "default", "name": svc.images.model,
+                              "family": svc.images.family, "available": not svc.images.missing()}]
+                available += [{"id": ident, "name": gen.model, "family": gen.family,
+                               "available": not gen.missing()}
+                              for ident, gen in svc.image_profiles.items()]
+                self._json(200, {"models": available})
+                return
             if path == "/metrics/prometheus":
                 if self._authorized():
                     body = svc.prometheus().encode()
@@ -6592,6 +6604,17 @@ def make_handler(svc: Service):
                                            "message": "image generation is not set up on this server (run setup "
                                                       "with --images qwen-image)"}})
                 return
+            profile_id = req.get("strata_image_profile", "default")
+            if not isinstance(profile_id, str) or len(profile_id) > 64:
+                raise images_api.ImageRequestError("strata_image_profile: invalid model id")
+            if profile_id != "default":
+                gen = svc.image_profiles.get(profile_id)
+                if gen is None:
+                    raise images_api.ImageRequestError("strata_image_profile: model not found")
+            missing = gen.missing()
+            if missing:
+                raise images_api.ImageRequestError("selected image model is unavailable: " +
+                                                   ", ".join(Path(f).name for f in missing))
             job = images_api.parse_request(req, gen.cfg)        # ImageRequestError (a ValueError): 400
             if svc.session_v1:
                 # Generated images belong to this deployment even when the client requests base64.
@@ -6614,6 +6637,7 @@ def make_handler(svc: Service):
                                            "message": str(e)}})
                 return
             figures["gpu_policy"] = policy
+            figures["image_profile"] = profile_id
             if svc.session_v1 and job["response_format"] != "url":
                 for png in images:
                     gen.store(png)  # base64 responses also get durable PNG files
@@ -8074,6 +8098,17 @@ def main() -> int:
                 for k, v in cfg["images"].items()}
         try:
             svc.images = images_api.ImageGen(icfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None)
+            # Optional independent model presets for the Images page. The
+            # default profile remains untouched, including all chat tool calls.
+            profiles = icfg.get("profiles") or {}
+            if not isinstance(profiles, dict) or len(profiles) > 16:
+                raise ValueError('images.profiles must be an object with at most 16 entries')
+            for ident, overrides in profiles.items():
+                if (not isinstance(ident, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", ident)
+                        or ident == "default" or not isinstance(overrides, dict)):
+                    raise ValueError('invalid image profile id or config')
+                resolved = {**icfg, **overrides, "profiles": {}}
+                svc.image_profiles[ident] = images_api.ImageGen(resolved)
         except ValueError as e:
             raise SystemExit(f"[strata] config: {e}")
         gone = svc.images.missing()

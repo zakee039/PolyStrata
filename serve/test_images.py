@@ -79,6 +79,26 @@ class Command(unittest.TestCase):
             "--sigmas", "1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568,0.0",
             "-s", "42", "-o", "o/img_%d.png", "--diffusion-fa", "--vae-tiling"])
 
+    def test_sdxl_checkpoint_arguments_and_defaults(self):
+        cfg = {"exe": "sd-cli", "family": "sdxl", "checkpoint": "animagine.safetensors",
+               "model_name": "Animagine XL 4.0 Opt", "steps": 28, "cfg_scale": 7.0,
+               "args": ["--backend", "vulkan1", "--offload-to-cpu"]}
+        job = images_api.parse_request({"prompt": "miku", "size": "768x768", "seed": 7}, cfg)
+        self.assertEqual(job["steps"], 28)
+        cmd = images_api.sd_cli_args(cfg, job, "out.png")
+        self.assertIn("--model", cmd)
+        self.assertEqual(cmd[cmd.index("--model") + 1], "animagine.safetensors")
+        self.assertEqual(cmd[cmd.index("--cfg-scale") + 1], "7.0")
+        for forbidden in ("--sigmas", "--llm", "--vae", "--diffusion-model"):
+            self.assertNotIn(forbidden, cmd)
+        with tempfile.TemporaryDirectory() as d:
+            checkpoint = Path(d) / "animagine.safetensors"
+            checkpoint.write_bytes(b"weights")
+            gen = images_api.ImageGen({**cfg, "checkpoint": str(checkpoint), "exe": str(FAKE)})
+            self.assertEqual(gen.missing(), [])
+            self.assertEqual(gen.family, "sdxl")
+            self.assertGreater(images_api.need_mib(gen.cfg, 768, 768), 2000)
+
     def test_other_steps_and_batch(self):
         cfg = {"exe": "sd-cli", "diffusion_model": "d", "vae": "v", "llm": "l"}
         cmd = images_api.sd_cli_args(cfg, {"prompt": "p", "width": 512, "height": 512, "n": 3, "steps": 4,
@@ -263,6 +283,32 @@ class OverHttp(unittest.TestCase):
         except urllib.error.HTTPError as e:
             with e:
                 return e.code, e.read(), None
+
+    def test_page_only_profiles_and_chat_default(self):
+        checkpoint = Path(self.tmp.name) / "animagine.safetensors"
+        checkpoint.write_bytes(b"sdxl mock weights")
+        cfg = {**self.svc.images.cfg, "family": "sdxl", "checkpoint": str(checkpoint),
+               "model_name": "Animagine XL 4.0 Opt", "steps": 28, "cfg_scale": 7.0}
+        self.svc.image_profiles["animagine-xl"] = images_api.ImageGen(cfg)
+        code, payload, _ = self.get("/v1/mikuchin/image-models")
+        self.assertEqual(code, 200)
+        models = json.loads(payload)["models"]
+        self.assertEqual([m["id"] for m in models], ["default", "animagine-xl"])
+        self.assertTrue(all(m["available"] for m in models))
+        code, result = self.post({"prompt": "a watercolor cat", "size": "512x512",
+                                  "strata_image_profile": "animagine-xl"})
+        self.assertEqual(code, 200, result)
+        self.assertEqual(result["model"], "Animagine XL 4.0 Opt")
+        self.assertEqual(result["strata"]["image_profile"], "animagine-xl")
+        self.assertEqual(result["strata"]["steps"], 28)
+        code, result = self.post({"prompt": "same default", "size": "512x512"})
+        self.assertEqual(code, 200, result)
+        self.assertEqual(result["strata"]["image_profile"], "default")
+        self.assertEqual(result["strata"]["steps"], 8)
+        for invalid in ("other", "../secrets", 123, None):
+            self.assertEqual(self.post({"prompt": "x", "strata_image_profile": invalid})[0], 400)
+        checkpoint.unlink()
+        self.assertEqual(self.post({"prompt": "x", "strata_image_profile": "animagine-xl"})[0], 400)
 
     def test_b64(self):
         code, body = self.post({"prompt": "a red fox", "seed": 11, "n": 2, "size": "512x768"})
