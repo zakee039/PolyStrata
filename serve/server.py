@@ -6879,8 +6879,10 @@ def make_handler(svc: Service):
                 if not isinstance(source, list) or len(source) != 1 or not isinstance(source[0], dict) \
                         or source[0].get("role") != "user":
                     raise ValueError("stateless requests require exactly one user message")
-                if req.get("strata_mcp") or req.get("strata_image_tool") or req.get("tools"):
-                    raise ValueError("stateless requests do not support tools or workflows")
+                # The first-party image tool is single-turn, so permit it while
+                # disallowing external MCP, arbitrary tools and stateful workflows.
+                if req.get("strata_mcp") or req.get("tools"):
+                    raise ValueError("stateless requests do not support external tools or workflows")
             messages, tools, kw = openai_to_messages(req)
             session_id = req.get("strata_session_id")
             original_messages = req.get("messages", [])
