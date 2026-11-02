@@ -33,12 +33,66 @@
 .source-test-results details{margin-top:7px;padding:9px;border:1px solid var(--st-border);border-radius:9px}
 .source-test-results summary{cursor:pointer}
 .source-test-results pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 Consolas,monospace;max-height:180px;overflow:auto}
+
+/* Character settings: three focused sub-tabs with shared character selection. */
+.character-editor{width:min(920px,100%);padding-top:24px}
+.character-editor-head{align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}
+.character-editor-title{display:flex;flex-direction:column;gap:3px;min-width:180px}
+.character-editor-title strong{font-size:21px;letter-spacing:-.02em;color:var(--st-ink)}
+.character-picker{display:flex;gap:9px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+.character-picker label{white-space:nowrap;font-size:12px;color:var(--st-ink-muted)}
+.character-picker .st-input{width:190px;max-width:100%;height:37px}
+.character-picker .st-btn{height:37px;white-space:nowrap}
+.character-subtabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;
+  padding:5px;margin-bottom:12px;background:var(--st-surface-2);
+  border:1px solid var(--st-line);border-radius:12px}
+.character-subtab{height:40px;border:0;background:transparent;border-radius:8px;
+  color:var(--st-ink-soft);font:600 13px/1 var(--st-font);cursor:pointer}
+.character-subtab:hover{color:var(--st-ink);background:var(--st-surface)}
+.character-subtab[aria-selected="true"]{color:var(--st-accent-text);
+  background:var(--st-surface);box-shadow:var(--st-sh-card)}
+.character-subpanel{padding:20px 22px 24px;border:1px solid var(--st-line);
+  border-radius:12px;background:var(--st-surface);box-shadow:var(--st-sh-card)}
+.character-subpanel[hidden]{display:none}
+.character-panel-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;
+  gap:12px;padding-bottom:16px;margin-bottom:18px;border-bottom:1px solid var(--st-line-soft)}
+.character-panel-heading h2{font-size:17px;font-weight:750;margin:0 0 5px;color:var(--st-ink)}
+.character-panel-heading p{font-size:12px;color:var(--st-ink-muted);margin:0}
+.character-panel-actions{display:flex;flex-wrap:wrap;gap:6px}
+.character-panel-actions .st-btn{font-size:12px;padding:7px 11px}
+.character-editor-grid{gap:15px}
+.character-editor-grid>label{color:var(--st-ink);font-weight:650}
+.character-persona{border-top:1px solid var(--st-line-soft);padding-top:19px;display:grid;gap:12px}
+.character-persona label{display:grid;gap:7px;font-weight:650;font-size:13px}
+.character-persona .st-btn{justify-self:start}
+.character-lore-head{padding:0 0 8px;border-bottom:1px solid var(--st-line-soft)}
+.character-lore-head strong{color:var(--st-ink);font-size:14px}
+.character-workflow-help{display:grid;gap:0;margin-top:4px;padding:13px 15px;
+  border:1px solid var(--st-line);border-radius:10px;background:var(--st-surface-2)}
+.character-workflow-help>strong{font-size:13px;margin-bottom:9px}
+.workflow-step{display:flex;align-items:start;gap:11px;padding:10px 0;
+  border-top:1px solid var(--st-line-soft)}
+.workflow-step>span{font:700 12px/1.5 Consolas,monospace;color:var(--st-accent-text)}
+.workflow-step>div{display:grid;gap:3px}
+.workflow-step b{font-size:13px}
+.workflow-step small{font-size:12px;color:var(--st-ink-muted)}
 @media(max-width:640px){
  .character-editor{padding:14px 12px 36px}
  .character-chat-bar{padding:6px 10px;gap:6px}
  .character-chat-bar .st-input{max-width:170px}
  .character-chat-status{display:none}
  .character-editor-head .st-btn{padding:6px}
+ .character-editor-head{align-items:stretch}
+ .character-editor-title{width:100%}
+ .character-picker{width:100%;justify-content:stretch}
+ .character-picker .st-input{width:auto;min-width:120px;flex:1}
+ .character-picker .st-btn{flex:0 0 auto}
+ .character-subtabs{margin-bottom:9px}
+ .character-subtab{height:39px}
+ .character-subpanel{padding:15px 12px 20px}
+ .character-panel-heading{align-items:flex-start}
+ .character-panel-actions{width:100%}
+ .character-panel-actions .st-btn{flex:1 1 auto}
 }
 
 #session-picker { max-width: 215px; min-width: 105px; height: 34px; font-size: 12px; padding: 3px 8px; }

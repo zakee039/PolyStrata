@@ -3,6 +3,34 @@
  */
 "use strict";
 const characterState = {cards: [], persona: "", assignments: {}, available: false, editId: ""};
+const characterSubTabs = ["card", "world", "workflow"];
+function showCharacterSubTab(name, focus = false) {
+  const active = characterSubTabs.includes(name) ? name : "card";
+  for (const key of characterSubTabs) {
+    const tab = $("character-subtab-" + key);
+    const panel = $("character-panel-" + key);
+    const selected = key === active;
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    panel.hidden = !selected;
+    if (selected && focus) tab.focus();
+  }
+}
+window.polyCharacterSubTab = showCharacterSubTab;
+for (const [index, key] of characterSubTabs.entries()) {
+  const tab = $("character-subtab-" + key);
+  tab.onclick = () => showCharacterSubTab(key);
+  tab.onkeydown = (event) => {
+    const offset = event.key === "ArrowRight" ? 1
+      : event.key === "ArrowLeft" ? -1 : 0;
+    if (!offset && !["Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === "Home" ? 0
+      : event.key === "End" ? characterSubTabs.length - 1
+      : (index + offset + characterSubTabs.length) % characterSubTabs.length;
+    showCharacterSubTab(characterSubTabs[next], true);
+  };
+}
 const characterFields = {
   name: "card-name", description: "card-description", personality: "card-personality",
   scenario: "card-scenario", first_mes: "card-greeting", mes_example: "card-examples",
@@ -234,9 +262,11 @@ function exportTavern(card) {
   };
 }
 
-$("character-manage").onclick = () => {showTab("characters"); editCharacter(selectedCharacter());};
+$("character-manage").onclick = () => {
+  showTab("characters"); editCharacter(selectedCharacter()); showCharacterSubTab("card");
+};
 $("card-list").onchange = () => editCharacter(characterState.cards.find((c) => c.id === $("card-list").value));
-$("card-new").onclick = () => editCharacter();
+$("card-new").onclick = () => {editCharacter(); showCharacterSubTab("card"); $("card-name").focus();};
 $("lore-add").onclick = () => loreRow();
 $("workflow-test-btn").onclick = async () => {
   const display = $("workflow-test-results");
@@ -304,6 +334,12 @@ $("source-test-btn").onclick = async () => {
   }
 };
 $("card-save").onclick = async () => {
+  if (!$("card-name").value.trim()) {
+    showCharacterSubTab("card");
+    $("card-name").focus();
+    toast("warn", "请先填写角色名");
+    return;
+  }
   try {
     const r = await characterRequest("save", {card: characterForm()});
     await charactersLoad();

@@ -26,7 +26,7 @@
     <button class="st-tab" role="tab" id="tab-btn-images" aria-controls="view-images" aria-selected="false" data-tab="images" hidden>
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-image"/></svg>Images</button>
     <button class="st-tab" role="tab" id="tab-btn-characters" aria-controls="view-characters" aria-selected="false" data-tab="characters">
-      Characters</button>
+      <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-character"/></svg>Characters</button>
     <button class="st-tab" role="tab" id="tab-btn-monitor" aria-controls="view-monitor" aria-selected="false" data-tab="monitor">
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-activity"/></svg>Monitor</button>
     <button class="st-tab" role="tab" id="tab-btn-about" aria-controls="view-about" aria-selected="false" data-tab="about">
@@ -95,48 +95,105 @@
   <section class="view view--characters" id="view-characters" role="tabpanel" aria-labelledby="tab-btn-characters" hidden>
     <div class="character-editor">
       <div class="character-editor-head">
-        <strong>角色与世界书</strong>
-        <select class="st-input" id="card-list" aria-label="Edit character"><option value="">新角色</option></select>
-        <button type="button" class="st-btn st-btn--secondary" id="card-new">新建</button>
-        <button type="button" class="st-btn st-btn--secondary" id="card-import">导入 JSON</button>
-        <input id="card-import-file" type="file" accept=".json,application/json" hidden>
+        <div class="character-editor-title">
+          <strong>角色配置</strong>
+          <span class="muted small">管理角色身份、世界设定与行为工作流</span>
+        </div>
+        <div class="character-picker">
+          <label for="card-list">当前角色</label>
+          <select class="st-input" id="card-list" aria-label="Edit character"><option value="">新角色</option></select>
+          <button type="button" class="st-btn st-btn--primary" id="card-save">保存设置</button>
+        </div>
       </div>
-      <div class="character-editor-grid">
-        <label>角色名<input class="st-input" id="card-name" maxlength="80" placeholder="例如：Miku 老师"></label>
-        <label>身份与背景<textarea class="st-input" id="card-description" rows="3" maxlength="6000"></textarea></label>
-        <label>性格与语气<textarea class="st-input" id="card-personality" rows="3" maxlength="4000"></textarea></label>
-        <label>场景设定<textarea class="st-input" id="card-scenario" rows="2" maxlength="4000"></textarea></label>
-        <label>开场白<textarea class="st-input" id="card-greeting" rows="2" maxlength="3000"></textarea></label>
-        <label>对话示例（可选）<textarea class="st-input" id="card-examples" rows="2" maxlength="4000" placeholder="{{user}}: 你好&#10;{{char}}: 你好呀！"></textarea></label>
-        <label>工作流 Markdown（可选）
-          <input class="st-input" id="card-workflow-path" maxlength="1024"
-            placeholder="本机绝对路径，例如 C:\Users\…\OneDrive\workflows\nlp_teacher.md">
-        </label>
-        <div class="workflow-editor-row">
-          <span class="muted small">绑定到当前角色；新会话的第一条用户消息初始化，后续持续遵守规则。</span>
-          <button type="button" class="st-btn st-btn--secondary" id="workflow-test-btn">检查工作流</button>
+
+      <div class="character-subtabs" role="tablist" aria-label="角色配置分类">
+        <button type="button" class="character-subtab" id="character-subtab-card" data-character-tab="card" role="tab"
+          aria-controls="character-panel-card" aria-selected="true" tabindex="0">角色卡</button>
+        <button type="button" class="character-subtab" id="character-subtab-world" data-character-tab="world" role="tab"
+          aria-controls="character-panel-world" aria-selected="false" tabindex="-1">世界书</button>
+        <button type="button" class="character-subtab" id="character-subtab-workflow" data-character-tab="workflow" role="tab"
+          aria-controls="character-panel-workflow" aria-selected="false" tabindex="-1">工作流</button>
+      </div>
+
+      <div class="character-subpanel" id="character-panel-card" role="tabpanel" aria-labelledby="character-subtab-card">
+        <div class="character-panel-heading">
+          <div><h2>角色卡</h2><p>定义模型的身份、性格与表达方式</p></div>
+          <div class="character-panel-actions">
+            <button type="button" class="st-btn st-btn--secondary" id="card-new">新建</button>
+            <button type="button" class="st-btn st-btn--secondary" id="card-import">导入 JSON</button>
+            <input id="card-import-file" type="file" accept=".json,application/json" hidden>
+            <button type="button" class="st-btn st-btn--secondary" id="card-export">导出 JSON</button>
+            <button type="button" class="st-btn st-btn--secondary" id="card-delete">删除角色</button>
+          </div>
         </div>
-        <div id="workflow-test-results" class="source-test-results" aria-live="polite"></div>
-        <div class="character-lore-head"><strong>世界书</strong><span class="muted small">最近对话命中关键词时插入</span><button type="button" class="st-btn st-btn--secondary" id="lore-add">＋ 条目</button></div>
-        <div id="lore-entries" class="lore-entries"></div>
-        <div class="character-lore-head"><strong>Markdown 资料</strong><span class="muted small">读取服务器本机路径，文件保留在原位置</span>
-          <button type="button" class="st-btn st-btn--secondary" id="source-add-file">＋ 文件</button>
-          <button type="button" class="st-btn st-btn--secondary" id="source-add-dir">＋ 目录</button></div>
-        <div id="source-entries" class="lore-entries"></div>
-        <p class="muted small">可填写 Windows 绝对路径，例如 <code>C:\Users\…\OneDrive\notes</code>；目录默认递归扫描 .md 文件。由独立 CPU 检索任务按需选择段落，不启动第二个模型。</p>
-        <div class="source-test-row"><input id="source-test-query" class="st-input" placeholder="检索测试：输入一个问题" maxlength="500">
-          <button type="button" class="st-btn st-btn--secondary" id="source-test-btn">测试检索</button></div>
-        <div id="source-test-results" class="source-test-results" aria-live="polite"></div>
-        <div class="character-editor-actions">
-          <button type="button" class="st-btn st-btn--primary" id="card-save">保存角色</button>
-          <button type="button" class="st-btn st-btn--secondary" id="card-export">导出酒馆 V2 JSON</button>
-          <button type="button" class="st-btn st-btn--secondary" id="card-delete">删除</button>
+        <div class="character-editor-grid">
+          <label>角色名<input class="st-input" id="card-name" maxlength="80" placeholder="例如：Miku 老师"></label>
+          <label>身份与背景<textarea class="st-input" id="card-description" rows="3" maxlength="6000"></textarea></label>
+          <label>性格与语气<textarea class="st-input" id="card-personality" rows="3" maxlength="4000"></textarea></label>
+          <label>场景设定<textarea class="st-input" id="card-scenario" rows="2" maxlength="4000"></textarea></label>
+          <label>开场白<textarea class="st-input" id="card-greeting" rows="2" maxlength="3000"></textarea></label>
+          <label>对话示例（可选）<textarea class="st-input" id="card-examples" rows="2" maxlength="4000"
+            placeholder="{{user}}: 你好&#10;{{char}}: 你好呀！"></textarea></label>
+          <div class="character-persona">
+            <label>我的 Persona（全局用户设定）
+              <textarea class="st-input" id="user-persona" rows="3" maxlength="4000"
+                placeholder="模型应该如何称呼你、如何理解你的身份"></textarea>
+            </label>
+            <button type="button" class="st-btn st-btn--secondary" id="persona-save">保存 Persona</button>
+          </div>
+          <p class="muted small">不选择角色时，聊天仍使用普通助手。支持酒馆常见角色卡 JSON 的基础导入与导出。</p>
         </div>
-        <label>我的 Persona（全局用户设定）
-          <textarea class="st-input" id="user-persona" rows="3" maxlength="4000" placeholder="模型应该如何称呼你、如何理解你的身份"></textarea>
-        </label>
-        <button type="button" class="st-btn st-btn--secondary" id="persona-save">保存 Persona</button>
-        <p class="muted small">不选择角色时，原有聊天保持不变。世界书仅作简单关键词匹配，最多注入 3500 字；角色、世界书与聊天绑定保存在服务器。</p>
+      </div>
+
+      <div class="character-subpanel" id="character-panel-world" role="tabpanel" aria-labelledby="character-subtab-world" hidden>
+        <div class="character-panel-heading">
+          <div><h2>世界书</h2><p>为当前角色提供按需触发的背景资料</p></div>
+        </div>
+        <div class="character-editor-grid">
+          <div class="character-lore-head">
+            <strong>手动条目</strong><span class="muted small">关键词命中或常驻时注入上下文</span>
+            <button type="button" class="st-btn st-btn--secondary" id="lore-add">＋ 条目</button>
+          </div>
+          <div id="lore-entries" class="lore-entries"></div>
+          <div class="character-lore-head">
+            <strong>Markdown 资料</strong><span class="muted small">读取本机文件，不修改原文</span>
+            <button type="button" class="st-btn st-btn--secondary" id="source-add-file">＋ 文件</button>
+            <button type="button" class="st-btn st-btn--secondary" id="source-add-dir">＋ 目录</button>
+          </div>
+          <div id="source-entries" class="lore-entries"></div>
+          <p class="muted small">支持本机绝对路径及 OneDrive 已同步目录，可递归检索 .md 文件；默认不启动第二个模型。</p>
+          <div class="source-test-row">
+            <input id="source-test-query" class="st-input" placeholder="输入一个问题，测试 Markdown 检索" maxlength="500">
+            <button type="button" class="st-btn st-btn--secondary" id="source-test-btn">测试检索</button>
+          </div>
+          <div id="source-test-results" class="source-test-results" aria-live="polite"></div>
+          <p class="muted small">修改完成后点击上方「保存设置」。世界书仅在相关时注入，不影响角色的基本身份。</p>
+        </div>
+      </div>
+
+      <div class="character-subpanel" id="character-panel-workflow" role="tabpanel" aria-labelledby="character-subtab-workflow" hidden>
+        <div class="character-panel-heading">
+          <div><h2>工作流</h2><p>告诉角色如何做事，而不改变角色本身</p></div>
+        </div>
+        <div class="character-editor-grid">
+          <label>绑定的 Markdown 工作流
+            <input class="st-input" id="card-workflow-path" maxlength="1024"
+              placeholder="例如 C:\Users\…\OneDrive\workflows\nlp_teacher.md">
+          </label>
+          <div class="workflow-editor-row">
+            <span class="muted small">绑定当前角色；新会话的第一条用户消息初始化，之后每轮按工作流约束执行。</span>
+            <button type="button" class="st-btn st-btn--secondary" id="workflow-test-btn">检查工作流</button>
+          </div>
+          <div id="workflow-test-results" class="source-test-results" aria-live="polite"></div>
+          <div class="character-workflow-help">
+            <strong>支持的 Markdown 章节</strong>
+            <div class="workflow-step"><span>01</span><div><b>初始化（仅执行一次）</b><small>新会话收到第一条用户消息时启用</small></div></div>
+            <div class="workflow-step"><span>02</span><div><b>全程行为约束</b><small>会话中的每一轮均生效</small></div></div>
+            <div class="workflow-step"><span>03</span><div><b>每轮工作流程</b><small>定义每次回答的处理顺序</small></div></div>
+            <div class="workflow-step"><span>04</span><div><b>工具权限</b><small>说明使用规则，不额外授予系统权限</small></div></div>
+          </div>
+          <p class="muted small">仅读取绑定的 Markdown 文件；模型切换不重复初始化，已有会话固定使用首次加载的工作流版本。</p>
+        </div>
       </div>
     </div>
   </section>
