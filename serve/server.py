@@ -8109,8 +8109,8 @@ def main() -> int:
             if not isinstance(profiles, dict) or len(profiles) > 16:
                 raise ValueError('images.profiles must be an object with at most 16 entries')
             for ident, overrides in profiles.items():
-                if (not isinstance(ident, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", ident)
-                        or ident == "default" or not isinstance(overrides, dict)):
+                if (not isinstance(ident, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,63}", ident)
+                        or ident == "default" or ".." in ident or not isinstance(overrides, dict)):
                     raise ValueError('invalid image profile id or config')
                 resolved = {**icfg, **overrides, "profiles": {}}
                 svc.image_profiles[ident] = images_api.ImageGen(resolved)
