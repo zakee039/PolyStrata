@@ -6212,10 +6212,12 @@ def make_handler(svc: Service):
                                  "image_generation": svc.images is not None,
                                  "loaded": svc.loaded(), "service": "strata"})
             elif path.startswith("/v1/images/files/"):
-                # response_format url: the name (32 random hex digits) is the access, as an OpenAI image URL is
-                f = svc.images.file(path[len("/v1/images/files/"):]) if svc.images is not None else None
+                # The name is a random capability token. SessionV1 images are
+                # stored in a persistent shared directory, not necessarily in
+                # the default generator's temporary per-process directory.
+                f = images_api.service_image_file(svc, path[len("/v1/images/files/"):])
                 if f is None:
-                    self._json(404, {"error": {"message": "not found (the server keeps the newest images only)"}})
+                    self._json(404, {"error": {"message": "image not found (the file may have expired or been removed)"}})
                     return
                 body = f.read_bytes()
                 self.send_response(200)

@@ -378,6 +378,46 @@ class OverHttp(unittest.TestCase):
         checkpoint.unlink()
         self.assertEqual(self.post({"prompt": "x", "strata_image_profile": "animagine-xl"})[0], 400)
 
+    def test_persistent_chat_image_works_after_restart_and_profile_switch(self):
+        # Regression: Chat's non-default model stored valid images, while GET
+        # looked only in the default generator's freshly created temp dir.
+        durable = Path(self.tmp.name) / "sessions"
+        durable.mkdir()
+        self.svc.session_v1 = type("SessionStore", (), {"root": durable})()
+        checkpoint = Path(self.tmp.name) / "animagine.safetensors"
+        checkpoint.write_bytes(b"mock weights")
+        cfg = {**self.svc.images.cfg, "family": "sdxl", "checkpoint": str(checkpoint),
+               "model_name": "Animagine", "steps": 28}
+        self.svc.image_profiles["animagine-xl-4-opt"] = images_api.ImageGen(cfg)
+        # Model A (non-default), with SessionV1 durable output directory.
+        code, resp = self.post({"prompt": "anime test", "size": "512x512",
+                                "strata_image_profile": "animagine-xl-4-opt",
+                                "response_format": "url"})
+        self.assertEqual(code, 200, resp)
+        url = resp["data"][0]["url"]
+        name = url.rsplit("/", 1)[1]
+        self.assertTrue((durable / "generated-images" / name).is_file())
+        self.assertNotEqual(self.svc.images.dir, durable / "generated-images")
+        code, png, mime = self.get(url[len(self.base):])
+        self.assertEqual((code, mime), (200, "image/png"))
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        # Simulate an application restart: both ImageGen objects now use fresh
+        # temporary directories, but the persistent file remains on disk.
+        self.svc.images.dir = Path(self.tmp.name) / "new-default-temp-dir"
+        self.svc.image_profiles["animagine-xl-4-opt"].dir = Path(self.tmp.name) / "new-profile-temp-dir"
+        code, png2, mime = self.get(url[len(self.base):])
+        self.assertEqual((code, mime), (200, "image/png"))
+        self.assertEqual(png2, png)
+        self.assertEqual(self.get("/v1/images/files/../../secrets")[0], 404)
+        self.assertEqual(self.get("/v1/images/files/" + "a" * 32 + ".png.bak")[0], 404)
+        # Regular official Chat generation also persists in the same directory.
+        code, resp = self.post({"prompt": "regular cat", "size": "512x512",
+                                "response_format": "url"})
+        self.assertEqual(code, 200, resp)
+        name2 = resp["data"][0]["url"].rsplit("/", 1)[1]
+        self.svc.images.dir = Path(self.tmp.name) / "reloaded-default-temp"
+        self.assertEqual(self.get("/v1/images/files/" + name2)[0], 200)
+
     def test_b64(self):
         code, body = self.post({"prompt": "a red fox", "seed": 11, "n": 2, "size": "512x768"})
         self.assertEqual(code, 200, body)

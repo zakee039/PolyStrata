@@ -424,6 +424,32 @@ class ImageGen:
         return out
 
 
+def service_image_file(svc, name: str) -> Path | None:
+    """Resolve an opaque PNG id across Chat and Images, including after restart.
+
+    SessionV1's generated-images directory is the durable, shared source of
+    truth. ImageGen.dir starts as a new temporary folder after each restart,
+    and each image model has its own ImageGen object: looking only in
+    svc.images.file(name) therefore loses otherwise valid conversation images.
+    """
+    if not isinstance(name, str) or FILE_NAME.fullmatch(name) is None:
+        return None
+    sessions = getattr(svc, "session_v1", None)
+    if sessions is not None:
+        path = sessions.root / "generated-images" / name
+        if path.is_file():
+            return path
+    # Maintain support for no-SessionV1 deployments and pre-migration outputs.
+    default = getattr(svc, "images", None)
+    generators = ([default] if default is not None else [])
+    generators += list(getattr(svc, "image_profiles", {}).values())
+    for gen in generators:
+        found = gen.file(name)
+        if found is not None:
+            return found
+    return None
+
+
 # ------------------------------------------------------------------------------------------- the GPU turn
 def resolve_policy(svc, gen: ImageGen, need: int) -> str:
     """auto -> keep / shrink / unload for this job (see the module's docstring); a fixed policy is kept, except that
