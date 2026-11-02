@@ -56,6 +56,20 @@ from typing import Iterator, Protocol
 from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
+# Mikuchin UI language is not model state and never enters the prompt.
+MIKUCHIN_LANGUAGE_FILE = os.environ.get("MIKUCHIN_LANGUAGE_FILE", "")
+
+
+def mikuchin_language():
+    if MIKUCHIN_LANGUAGE_FILE:
+        try:
+            language = json.loads(Path(MIKUCHIN_LANGUAGE_FILE).read_text(encoding="utf-8")).get("language")
+            if language in ("zh-CN", "ja-JP", "en-US"):
+                return language
+        except (OSError, ValueError, AttributeError):
+            pass
+    return "zh-CN"
+
 # Optional Mikuchin web frontend; PolyStrata remains standalone by default.
 WEB_DIR = Path(os.environ.get("MIKUCHIN_WEB_DIR") or (ROOT / "serve" / "web")).resolve()
 sys.path.insert(0, str(ROOT / "tools"))
@@ -6071,6 +6085,9 @@ def make_handler(svc: Service):
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            if path == "/v1/mikuchin/ui-language" and MIKUCHIN_LANGUAGE_FILE:
+                self._json(200, {"language": mikuchin_language()})
+                return
             if path == "/metrics/prometheus":
                 if self._authorized():
                     body = svc.prometheus().encode()
@@ -6253,6 +6270,23 @@ def make_handler(svc: Service):
                 return
             path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
             if path.startswith("/v1/") and self._foreign_page():
+                return
+            if path == "/v1/mikuchin/ui-language" and MIKUCHIN_LANGUAGE_FILE:
+                if not self._own_page("the UI language can be changed"):
+                    return
+                try:
+                    req = json.loads(self._body() or b"{}")
+                    value = req.get("language") if isinstance(req, dict) else None
+                    if value not in ("zh-CN", "ja-JP", "en-US"):
+                        raise ValueError("unsupported language")
+                    dest = Path(MIKUCHIN_LANGUAGE_FILE)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    # A tiny, nonsecret preference file shared with the local tray manager.
+                    dest.write_text(json.dumps({"language": value}) + "\n", encoding="utf-8")
+                except (ValueError, OSError) as exc:
+                    self._json(400, {"error": {"message": str(exc)}})
+                    return
+                self._json(200, {"language": value})
                 return
             if path == "/settings":
                 self._settings()
