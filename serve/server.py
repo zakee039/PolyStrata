@@ -56,6 +56,8 @@ from typing import Iterator, Protocol
 from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
+# Optional Mikuchin web frontend; PolyStrata remains standalone by default.
+WEB_DIR = Path(os.environ.get("MIKUCHIN_WEB_DIR") or (ROOT / "serve" / "web")).resolve()
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
@@ -6039,7 +6041,7 @@ def make_handler(svc: Service):
             if path.startswith("/fonts/"):
                 # the web app's font (Outfit, OFL: serve/web/fonts); the page falls back to the system font
                 name = path[len("/fonts/"):]
-                f = ROOT / "serve" / "web" / "fonts" / name
+                f = WEB_DIR / "fonts" / name
                 if "/" in name or "\\" in name or not name.endswith(".woff2") or not f.is_file():
                     self._json(404, {"error": {"message": "not found"}})
                     return
@@ -6056,7 +6058,7 @@ def make_handler(svc: Service):
                 name = path[len("/web/"):]
                 types = {".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                          ".svg": "image/svg+xml"}
-                f = ROOT / "serve" / "web" / name
+                f = WEB_DIR / name
                 ext = os.path.splitext(name)[1]
                 if "/" in name or "\\" in name or ext not in types or not f.is_file():
                     self._json(404, {"error": {"message": "not found"}})
@@ -6144,7 +6146,7 @@ def make_handler(svc: Service):
                     self._json(200, svc.mcp.status() if svc.mcp else {"servers": [], "tools": 0})
                 return
             if path == "" or (path == "/api-monitor" and svc.api_monitor):
-                body = (ROOT / "serve" / "web" / ("monitor.html" if path else "index.html")).read_bytes()
+                body = (WEB_DIR / ("monitor.html" if path else "index.html")).read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
