@@ -6121,6 +6121,27 @@ def make_handler(svc: Service):
                                records if request_id else {"requests": records, "retention": 100, "persistent": False,
                                                           "loaded": svc.loaded(), "auto_load": hasattr(svc.engine, "restart")})
                 return
+            if path.startswith("/v1/strata/characters/reference/"):
+                if not self._authorized():return
+                if self._foreign_origin():
+                    self._json(403, {"error": {"message": "foreign origin"}});return
+                if not svc.session_v1:
+                    self._json(404, {"error": {"message": "V1 sessions disabled"}});return
+                try:
+                    from serve.character_cards import CharacterStore
+                    file = CharacterStore(svc.session_v1.root).image_file(
+                        path[len("/v1/strata/characters/reference/"):])
+                except ValueError as exc:
+                    self._json(400, {"error": {"message": str(exc)}});return
+                if file is None:
+                    self._json(404, {"error": {"message": "image not found"}});return
+                body=file.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers();self.wfile.write(body)
+                return
             if path == "/v1/strata/characters":
                 if not self._authorized():
                     return
@@ -6354,6 +6375,10 @@ def make_handler(svc: Service):
                             raise ValueError("角色只能在空白新会话中选择")
                         cards.assign(session_id, req.get("card_id"))
                         self._json(200, {"saved": True})
+                    elif action == "reference_upload":
+                        self._json(200, {"card": cards.upload_reference(req.get("id"),req.get("data"))})
+                    elif action == "reference_remove":
+                        self._json(200, {"card": cards.remove_reference(req.get("id"))})
                     elif action == "global":
                         self._json(200, {"global": cards.set_global(req.get("global"))})
                     elif action in ("inspect_workflow", "prepare_workflow", "commit_workflow"):

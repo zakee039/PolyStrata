@@ -5,6 +5,9 @@ SQLite file sits next to SessionV1's server-owned conversations database.
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import io
 import json
 import re
 import sqlite3
@@ -123,6 +126,7 @@ def card_to_tavern(card: dict) -> dict:
 class CharacterStore:
     def __init__(self, root: str | Path):
         self.path = Path(root) / "character_cards.sqlite3"
+        self.image_dir = Path(root) / "character_images"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._db() as db:
             db.execute("CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
@@ -159,11 +163,80 @@ class CharacterStore:
         card = valid_card(raw)
         with self._db() as db:
             n = db.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
-            exists = db.execute("SELECT 1 FROM cards WHERE id=?", (card["id"],)).fetchone()
+            existing = db.execute("SELECT data FROM cards WHERE id=?", (card["id"],)).fetchone()
+            exists = existing is not None
+            # Do not trust reference_image from form JSON: only validated uploads set it.
+            card["reference_image"] = bool(existing and json.loads(existing[0]).get("reference_image"))
             if not exists and n >= MAX_CARDS:
                 raise ValueError("maximum 200 character cards reached")
             db.execute("INSERT OR REPLACE INTO cards(id,data) VALUES(?,?)",
                        (card["id"], json.dumps(card, ensure_ascii=False)))
+        return card
+
+    def image_file(self, ident: str) -> Path | None:
+        if not isinstance(ident, str) or not CARD_ID.fullmatch(ident):
+            raise ValueError("invalid character id")
+        card = self.get(ident)
+        file = self.image_dir / (ident + ".png")
+        return file if card and card.get("reference_image") and file.is_file() else None
+
+    def upload_reference(self, ident: str, encoded: object) -> dict:
+        """Normalize a bounded image to a private, model-independent PNG."""
+        if not isinstance(ident, str) or not CARD_ID.fullmatch(ident):
+            raise ValueError("invalid character id")
+        if not isinstance(encoded, str) or len(encoded) > 7_200_000:
+            raise ValueError("image must be base64 and no larger than 5 MB")
+        if not self.get(ident):
+            raise ValueError("save the character before uploading an image")
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as e:
+            raise ValueError("invalid image encoding") from e
+        if not raw or len(raw) > 5 * 1024 * 1024:
+            raise ValueError("image must be between 1 byte and 5 MB")
+        try:
+            from PIL import Image, ImageOps, UnidentifiedImageError
+            with Image.open(io.BytesIO(raw)) as probe:
+                if probe.format not in ("PNG", "JPEG", "WEBP") or probe.width * probe.height > 16_000_000:
+                    raise ValueError("use PNG, JPEG or WebP up to 16 megapixels")
+                probe.verify()
+            with Image.open(io.BytesIO(raw)) as image:
+                image = ImageOps.exif_transpose(image)
+                image.thumbnail((1600, 1600))
+                image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+                result = io.BytesIO()
+                image.save(result, format="PNG", optimize=True)
+                payload = result.getvalue()
+        except (OSError, ValueError) as e:
+            raise ValueError("invalid or unsupported image") from e
+        if len(payload) > 8 * 1024 * 1024:
+            raise ValueError("processed image exceeds 8 MB")
+        self.image_dir.mkdir(parents=True, exist_ok=True)
+        dest = self.image_dir / (ident + ".png")
+        temp = self.image_dir / (ident + ".tmp")
+        try:
+            temp.write_bytes(payload)
+            temp.replace(dest)
+            with self._db() as db:
+                existing = db.execute("SELECT data FROM cards WHERE id=?", (ident,)).fetchone()
+                if not existing:
+                    raise ValueError("character was deleted during upload")
+                card = json.loads(existing[0]); card["reference_image"] = True
+                db.execute("UPDATE cards SET data=? WHERE id=?", (json.dumps(card, ensure_ascii=False), ident))
+            return card
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def remove_reference(self, ident: str) -> dict:
+        if not isinstance(ident, str) or not CARD_ID.fullmatch(ident):
+            raise ValueError("invalid character id")
+        with self._db() as db:
+            current = db.execute("SELECT data FROM cards WHERE id=?", (ident,)).fetchone()
+            if not current:
+                raise ValueError("character not found")
+            card = json.loads(current[0]);card["reference_image"] = False
+            db.execute("UPDATE cards SET data=? WHERE id=?",(json.dumps(card,ensure_ascii=False),ident))
+        (self.image_dir / (ident + ".png")).unlink(missing_ok=True)
         return card
 
     def remove(self, ident: str) -> None:
@@ -174,6 +247,7 @@ class CharacterStore:
             db.execute("DELETE FROM assignments WHERE card_id=?", (ident,))
             db.execute("DELETE FROM workflow_sessions WHERE card_id=?", (ident,))
             db.execute("UPDATE options SET value='stateless' WHERE key='default_role' AND value=?", (ident,))
+        (self.image_dir / (ident + ".png")).unlink(missing_ok=True)
 
     def assign(self, session: str, ident: str | None) -> None:
         if not isinstance(session, str) or not SESSION_ID.fullmatch(session):

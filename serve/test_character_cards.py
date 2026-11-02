@@ -1,3 +1,5 @@
+import base64
+import io
 import json
 import tempfile
 import unittest
@@ -16,6 +18,34 @@ class CharacterTests(unittest.TestCase):
                     {"keys": "樱花, cherry", "content": "今天是春天", "constant": False},
                     {"keys": "", "content": "始终保持友好", "constant": True},
                 ]}
+
+    def test_reference_image_upload_roundtrip_and_restrictions(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as root:
+            store = CharacterStore(root)
+            card = store.save({"name":"Test Miku"})
+            image = Image.new("RGB", (320, 640), (30, 195, 190))
+            image_data = io.BytesIO()
+            image.save(image_data, format="PNG")
+            uploaded = store.upload_reference(card["id"], base64.b64encode(image_data.getvalue()).decode())
+            self.assertTrue(uploaded["reference_image"])
+            file = store.image_file(card["id"])
+            self.assertTrue(file and file.is_file())
+            with Image.open(file) as actual:
+                self.assertEqual(actual.size, (320, 640))
+            edited = store.save({"id":card["id"],"name":"Updated Miku"})
+            self.assertTrue(edited["reference_image"])
+            self.assertTrue(store.get(card["id"])["reference_image"])
+            with self.assertRaises(ValueError):
+                store.upload_reference(card["id"], "NOT BASE64")
+            with self.assertRaises(ValueError):
+                store.upload_reference("..\\unsafe", "AA==")
+            self.assertFalse(store.remove_reference(card["id"])["reference_image"])
+            self.assertIsNone(store.image_file(card["id"]))
+            self.assertFalse(file.exists())
+            store.upload_reference(card["id"], base64.b64encode(image_data.getvalue()).decode())
+            store.remove(card["id"])
+            self.assertFalse(file.exists())
 
     def test_persistence_assignment_and_deletion(self):
         with tempfile.TemporaryDirectory() as tmp:
