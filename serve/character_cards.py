@@ -40,6 +40,12 @@ def valid_card(data: object) -> dict:
     if not isinstance(ident, str) or not CARD_ID.fullmatch(ident):
         raise ValueError("invalid character id")
     card["id"] = ident
+    mode = data.get("persona_mode", "global")
+    if mode not in ("none", "global", "independent"):
+        raise ValueError("persona_mode must be none, global, or independent")
+    card["persona_mode"] = mode
+    card["user_name"] = _text(data.get("user_name", ""), 80, "user_name")
+    card["user_description"] = _text(data.get("user_description", ""), 4000, "user_description")
     raw_lore = data.get("lorebook", [])
     if not isinstance(raw_lore, list) or len(raw_lore) > MAX_LORE:
         raise ValueError("lorebook must be a list of at most 100 entries")
@@ -141,9 +147,13 @@ class CharacterStore:
         with self._db() as db:
             cards = [json.loads(row[0]) for row in db.execute("SELECT data FROM cards ORDER BY rowid")]
             rows = db.execute("SELECT session_id,card_id FROM assignments").fetchall()
-            persona = db.execute("SELECT value FROM options WHERE key='persona'").fetchone()
-        return {"cards": cards, "assignments": {r[0]: r[1] for r in rows},
-                "persona": persona[0] if persona else ""}
+            settings = {r[0]:r[1] for r in db.execute(
+                "SELECT key,value FROM options WHERE key IN "
+                "('user_name','user_description','default_role')")}
+        return {"cards": cards, "assignments": {r[0]:r[1] for r in rows},
+                "global": {"user_name": settings.get("user_name", ""),
+                           "user_description": settings.get("user_description", ""),
+                           "default_role": settings.get("default_role", "stateless")}}
 
     def save(self, raw: object) -> dict:
         card = valid_card(raw)
@@ -163,24 +173,39 @@ class CharacterStore:
             db.execute("DELETE FROM cards WHERE id=?", (ident,))
             db.execute("DELETE FROM assignments WHERE card_id=?", (ident,))
             db.execute("DELETE FROM workflow_sessions WHERE card_id=?", (ident,))
+            db.execute("UPDATE options SET value='stateless' WHERE key='default_role' AND value=?", (ident,))
 
     def assign(self, session: str, ident: str | None) -> None:
         if not isinstance(session, str) or not SESSION_ID.fullmatch(session):
             raise ValueError("invalid session id")
-        if ident is not None and (not isinstance(ident, str) or not CARD_ID.fullmatch(ident)):
+        if ident is not None and ident not in ("stateless", "ordinary") and (
+                not isinstance(ident, str) or not CARD_ID.fullmatch(ident)):
             raise ValueError("invalid character id")
         with self._db() as db:
-            if ident is not None and not db.execute("SELECT 1 FROM cards WHERE id=?", (ident,)).fetchone():
+            if ident is not None and ident not in ("stateless", "ordinary") and not db.execute(
+                    "SELECT 1 FROM cards WHERE id=?", (ident,)).fetchone():
                 raise ValueError("character not found")
             db.execute("DELETE FROM assignments WHERE session_id=?", (session,))
             if ident is not None:
                 db.execute("INSERT INTO assignments VALUES(?,?)", (session, ident))
 
-    def set_persona(self, persona: str) -> str:
-        persona = _text(persona, 4000, "persona")
+    def set_global(self, raw: object) -> dict:
+        if not isinstance(raw, dict):
+            raise ValueError("global settings must be an object")
+        name = _text(raw.get("user_name", ""), 80, "user_name")
+        description = _text(raw.get("user_description", ""), 4000, "user_description")
+        default_role = raw.get("default_role", "stateless")
+        if default_role not in ("stateless", "ordinary"):
+            if not isinstance(default_role, str) or not CARD_ID.fullmatch(default_role):
+                raise ValueError("invalid default role")
+            if not self.get(default_role):
+                raise ValueError("default role does not exist")
         with self._db() as db:
-            db.execute("INSERT OR REPLACE INTO options VALUES('persona', ?)", (persona,))
-        return persona
+            db.executemany("INSERT OR REPLACE INTO options VALUES(?,?)", [
+                ("user_name", name), ("user_description", description),
+                ("default_role", default_role)])
+        return {"user_name": name, "user_description": description,
+                "default_role": default_role}
 
     def assigned_card(self, session: str) -> dict | None:
         if not isinstance(session, str) or not SESSION_ID.fullmatch(session):

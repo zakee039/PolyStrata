@@ -20,17 +20,41 @@ class CharacterTests(unittest.TestCase):
     def test_persistence_assignment_and_deletion(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = CharacterStore(tmp)
-            self.assertEqual(db.snapshot(), {"cards": [], "assignments": {}, "persona": ""})
+            self.assertEqual(db.snapshot(), {"cards":[], "assignments":{}, "global":{
+                "user_name":"", "user_description":"", "default_role":"stateless"}})
             card = db.save(self.sample())
-            db.set_persona("喜欢编程")
+            db.set_global({"user_name":"Zakee", "user_description":"喜欢编程", "default_role":"ordinary"})
             db.assign("a" * 32, card["id"])
             saved = CharacterStore(tmp).snapshot()
-            self.assertEqual(saved["persona"], "喜欢编程")
+            self.assertEqual(saved["global"], {"user_name":"Zakee", "user_description":"喜欢编程",
+                                              "default_role":"ordinary"})
             self.assertEqual(saved["assignments"]["a" * 32], card["id"])
             self.assertEqual(saved["cards"][0]["name"], "Miku 老师")
             db.remove(card["id"])
             self.assertEqual(CharacterStore(tmp).snapshot()["assignments"], {})
             self.assertEqual(CharacterStore(tmp).snapshot()["cards"], [])
+
+    def test_builtin_roles_and_persona_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = CharacterStore(tmp)
+            for role in ("stateless", "ordinary"):
+                db.assign("session_"+role, role)
+                self.assertEqual(db.snapshot()["assignments"]["session_"+role], role)
+                self.assertIsNone(db.assigned_card("session_"+role))
+            card = db.save({"name":"Miku", "persona_mode":"independent",
+                            "user_name":"主人", "user_description":"住在青海"})
+            self.assertEqual(db.get(card["id"])["persona_mode"], "independent")
+            self.assertEqual(db.get(card["id"])["user_name"], "主人")
+            db.set_global({"user_name":"Zakee", "user_description":"喜欢编程",
+                           "default_role":card["id"]})
+            self.assertEqual(db.snapshot()["global"]["default_role"], card["id"])
+            db.remove(card["id"])
+            self.assertEqual(db.snapshot()["global"]["default_role"], "stateless")
+            for invalid in ("unknown", "../../file", "e" * 32):
+                with self.assertRaises(ValueError):
+                    db.set_global({"default_role": invalid})
+            with self.assertRaises(ValueError):
+                db.save({"name":"Oops", "persona_mode":"unknown"})
 
     def test_card_roundtrip(self):
         x = valid_card(self.sample())
@@ -101,7 +125,7 @@ class CharacterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 db.assign("safe_id", "a" * 32)
             with self.assertRaises(ValueError):
-                db.set_persona("u" * 4001)
+                db.set_global({"user_name":"Zakee", "user_description":"u" * 4001})
 
 
 if __name__ == "__main__":

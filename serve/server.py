@@ -6346,10 +6346,16 @@ def make_handler(svc: Service):
                         cards.remove(req.get("id"))
                         self._json(200, {"deleted": True})
                     elif action == "assign":
-                        cards.assign(req.get("session_id"), req.get("card_id"))
+                        session_id = req.get("session_id")
+                        from serve.session_v1 import valid_id
+                        valid_id(session_id)
+                        prior = svc.session_v1.get(session_id)
+                        if prior and (prior.get("web_messages") or prior.get("api_messages")):
+                            raise ValueError("角色只能在空白新会话中选择")
+                        cards.assign(session_id, req.get("card_id"))
                         self._json(200, {"saved": True})
-                    elif action == "persona":
-                        self._json(200, {"persona": cards.set_persona(req.get("persona"))})
+                    elif action == "global":
+                        self._json(200, {"global": cards.set_global(req.get("global"))})
                     elif action in ("inspect_workflow", "prepare_workflow", "commit_workflow"):
                         from serve.workflow_profile import WorkflowRuntime
                         workflow = WorkflowRuntime(cards)
@@ -6838,6 +6844,18 @@ def make_handler(svc: Service):
         def _openai(self, req):
             req = svc.with_shared(req, "openai")
             bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
+            stateless = req.get("mikuchin_stateless", False)
+            if not isinstance(stateless, bool):
+                raise ValueError("mikuchin_stateless must be a boolean")
+            if stateless:
+                # Only the current prompt reaches inference; a session ID is still
+                # permitted for durable chat history, not KV restoration.
+                source = req.get("messages")
+                if not isinstance(source, list) or len(source) != 1 or not isinstance(source[0], dict) \
+                        or source[0].get("role") != "user":
+                    raise ValueError("stateless requests require exactly one user message")
+                if req.get("strata_mcp") or req.get("strata_image_tool") or req.get("tools"):
+                    raise ValueError("stateless requests do not support tools or workflows")
             messages, tools, kw = openai_to_messages(req)
             session_id = req.get("strata_session_id")
             original_messages = req.get("messages", [])
@@ -6876,17 +6894,22 @@ def make_handler(svc: Service):
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
             cancel = self.cancel                             # watched since _post() (#430 #431 #1999)
-            if session_id:
+            if session_id and not stateless:
                 svc.session_v1.store_api(session_id, original_messages)
-            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force, req=req, cancel=cancel)
-            _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
-            run = run_with_mcp(svc, hub, messages, tools, kw, ids, thinking, max_new, max_req, req, cancel,
+            # Session identity is kept for durable storage, but omitted from the
+            # inference sampling path to bypass session KV restoration/snapshotting.
+            inference_req = ({k:v for k,v in req.items() if k != "strata_session_id"}
+                             if stateless else req)
+            ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force,
+                                                 req=inference_req, cancel=cancel)
+            _debug_req("openai", inference_req, messages, tools, max_new, thinking, len(ids))
+            run = run_with_mcp(svc, hub, messages, tools, kw, ids, thinking, max_new, max_req, inference_req, cancel,
                                {t["name"] for t in extra}) if use_mcp else None
-            chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run, force=force)
+            chunks = openai_chunks(svc, inference_req, ids, thinking, tools, max_new, cancel, run=run, force=force)
             if validator is not None:
                 chunks = structured_chunks(chunks, validator)
             chunks = self._capture(chunks, "openai")
-            if session_id:
+            if session_id and not stateless:
                 def durable(chunks):
                     content, reasoning, tool_parts, finished = [], [], {}, False
                     try:
