@@ -7785,7 +7785,9 @@ def model_settings(cfg: dict, overrides: dict | None = None) -> dict:
     budget = cfg.get("reasoning_budget_tokens")        # #123: a default thinking budget for every request
     if budget is not None:
         budget_tokens(budget)
-    loops = cfg.get("reasoning_loop_recovery", False)  # #728: false (default) | "stop" | "recover" (true)
+    # Mikuchin enables loop detection for every model; standalone PolyStrata keeps its opt-in default.
+    default_loop_mode = "stop" if os.environ.get("MIKUCHIN_WEB_DIR") else False
+    loops = cfg.get("reasoning_loop_recovery", default_loop_mode)
     if loops is True:
         loops = "recover"
     if loops is not False and loops not in ("stop", "recover"):
