@@ -5428,6 +5428,84 @@ def _debug_req(api, req, messages, tools, max_new, thinking, prompt_tokens):
 
 
 # ------------------------------------------------------------------------------------------------ MCP tool loop
+IMAGE_FOLLOWUP_MAX_TOKENS = 256
+
+
+def image_visual_followup(svc, messages, call, result, kwargs, sampling, cancel):
+    """One bounded, tool-free visual reply after a successful image generation.
+
+    Returns a stream of (event/ping/done) tuples. The extra picture and prompt
+    are transient: they must not appear in saved chat history or subsequent
+    turns. Any failure is handled by the caller's fixed-text fallback.
+    """
+    if cancel.is_set() or getattr(svc, "vision", None) is None:
+        return
+    from serve import images as images_api
+    # 4x upscaling changes resolution, not scene content. Prefer the original
+    # file for efficient visual encoding and fall back to the displayed image.
+    file = (images_api.service_image_file(svc, result.get("image_original_file"))
+            or images_api.service_image_file(svc, result.get("image_file")))
+    if file is None:
+        return
+    prompt = ("请观察刚刚生成的图片，结合用户本轮的愿望，以当前角色身份自然地回应用户。"
+              "使用用户本轮对话所用的语言，只说一两句简短、贴近画面细节的话；不要思考过程、不要再调用工具、"
+              "不要再次生成图片，也不要声称执行了未发生的修改。")
+    context = [
+        *messages,
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": call.id, "function": {"name": call.name, "arguments": call.arguments}}]},
+        {"role": "tool", "tool_call_id": call.id, "content": result["text"]},
+        {"role": "user", "content": [{"type": "text", "text": prompt},
+                                    {"type": "image", "source": str(file)}]},
+    ]
+    # Do not reuse the calling request's thinking or tools. Disabling thinking
+    # through template kwargs also changes the model's generation prefix.
+    vision_kw = {**kwargs, "enable_thinking": False, "reasoning_effort": "none"}
+    vision_sampling = {**(sampling or {}), "reasoning_effort": "none",
+                       "reasoning_budget_tokens": 0,
+                       "answer_budget_tokens": IMAGE_FOLLOWUP_MAX_TOKENS}
+    # The transient extra picture/user turn is NOT a durable conversation.
+    # Without a session ID the engine cannot save it into this chat's KV
+    # snapshot; on the next real turn it reuses or recalculates a valid prefix.
+    vision_sampling.pop("strata_session_id", None)
+    prepared = {}
+
+    def prepare():
+        try:
+            prepared["value"] = svc.prepare(context, None, vision_kw, IMAGE_FOLLOWUP_MAX_TOKENS,
+                                            cancel=cancel)
+        except Exception as exc:
+            prepared["error"] = exc
+
+    # Vision encoding can take time on CPU. Continue SSE heartbeats while it
+    # works, so browser Stop and disconnect cancel the expensive operation.
+    worker = threading.Thread(target=prepare, daemon=True)
+    worker.start()
+    try:
+        while worker.is_alive():
+            worker.join(1.0)
+            if worker.is_alive():
+                if cancel.is_set():
+                    return
+                yield "ping", None
+    except GeneratorExit:
+        cancel.set()
+        raise
+    if cancel.is_set():
+        return
+    if "error" in prepared:
+        raise prepared["error"]
+    ids, thinking, max_new = prepared["value"]
+    # Account for this *second* visual prompt, including image patch tokens.
+    yield "visual_prompt_tokens", len(ids)
+    # No second tool round is possible: Service.run sees tools=None.
+    for kind, payload in svc.run(ids, False, None, min(IMAGE_FOLLOWUP_MAX_TOKENS, max_new),
+                                 vision_sampling, cancel):
+        if kind == "event" and payload.kind not in ("content",):
+            continue
+        yield kind, payload
+
+
 def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new, max_req, sampling, cancel,
                  mcp_names):
     """Service.run with the MCP tools executed here: the model writes a call to an MCP tool, the server runs it, adds
@@ -5440,6 +5518,7 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
     could not reach the model before the client's)."""
     max_rounds = int(hub.settings["max_rounds"])
     total, rounds, done = 0, 0, None
+    visual_prompt_tokens = 0
     messages = list(messages)
     while True:
         text, reasoning, calls, own_calls = [], [], [], 0
@@ -5506,17 +5585,33 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
             yield "mcp", {"event": "result", "id": c.id, **{k: r[k] for k in ("ok", "text", "chars", "truncated", "ms")},
                           **({"image_file": r["image_file"], "image_prompt": r.get("image_prompt", ""),
                               "image_original_file": r.get("image_original_file"),
+                              "edited_previous": r.get("edited_previous", False),
                               "upscale_applied": r.get("upscale_applied", False),
                               "upscale_fallback": r.get("upscale_fallback", False)}
                              if r.get("image_file") else {})}
-            # Chat embeds the generated image directly from the tool result.
-            # Continuing inference merely to say it was generated can enter a
-            # huge reasoning-only turn (tens of thousands of invisible tokens).
-            # Failed single-image calls also stop, rather than retrying
-            # autonomously and consuming the remaining reasoning budget.
+            # Exactly one post-image inference is permitted. It is vision-only
+            # context, with no thinking/tools and at most 256 output tokens.
+            # Failure must never trigger another image generation.
             if len(calls) == 1 and c.name == "polystrata__generate_image":
                 if r.get("ok") and r.get("image_file"):
-                    yield "event", Event("content", "图片已生成。")
+                    saw_text = False
+                    try:
+                        for kind, payload in image_visual_followup(svc, messages, c, r, kw, sampling, cancel):
+                            if kind == "done":
+                                total += payload.get("completion_tokens", 0)
+                                done = {**done, "finish": payload.get("finish", "stop")}
+                            elif kind == "visual_prompt_tokens":
+                                visual_prompt_tokens += payload
+                            elif kind == "event" and payload.kind == "content" and payload.text:
+                                saw_text = True
+                                yield kind, payload
+                            elif kind == "ping":
+                                yield kind, payload
+                    except Exception as exc:
+                        print(f"[strata] image visual followup unavailable ({type(exc).__name__}: {str(exc)[:180]})",
+                              flush=True)
+                    if not saw_text and not cancel.is_set():
+                        yield "event", Event("content", "图片已生成。")
                 elif not r.get("ok"):
                     yield "event", Event("content", "图像生成失败，请查看上方工具详情并重试。")
                 else:
@@ -5536,7 +5631,8 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
         except ClientGone:                                      # #1999: the client left while a picture was prepared
             done = {**done, "finish": "cancel"}
             break
-    yield "done", {**done, "completion_tokens": total, "prompt_tokens": len(ids)}
+    yield "done", {**done, "completion_tokens": total,
+                   "prompt_tokens": len(ids) + visual_prompt_tokens}
 
 
 # ------------------------------------------------------------------------------------------------ OpenAI
@@ -6967,6 +7063,9 @@ def make_handler(svc: Service):
                 if not svc.session_v1:
                     raise ValueError("strata_session_id requires session_v1_dir in the model config")
             self._no_local_images(messages)
+            if session_id and not stateless and svc.vision is not None:
+                from serve.image_tools import add_relevant_image
+                messages = add_relevant_image(svc, session_id, messages)
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # as the Responses route: no tools are offered
                 tools = None
             force = forced_call(req.get("tool_choice"), tools)      # a bad value is a 400 before anything is sent
@@ -6986,8 +7085,15 @@ def make_handler(svc: Service):
                 if use_external_mcp:
                     svc.mcp.wait(10)                               # servers still starting (only right after start)
                 from serve.image_tools import ChatImageHub
+                last_user = original_messages[-1] if original_messages and isinstance(original_messages[-1], dict) else {}
+                parts = last_user.get("content") if last_user.get("role") == "user" else ""
+                last_user_text = (parts if isinstance(parts, str) else
+                                  " ".join(p.get("text", "") for p in parts
+                                           if isinstance(p, dict) and p.get("type") == "text")
+                                  if isinstance(parts, list) else "")
                 hub = ChatImageHub(svc, svc.mcp if use_external_mcp else None,
-                                   session_id=session_id, stateless=stateless)
+                                   session_id=session_id, stateless=stateless,
+                                   latest_user_text=last_user_text)
                 extra = hub.template_tools(exclude=own)            # the request's own tools win a name clash
                 use_mcp = bool(extra)
                 tools = (tools or []) + extra or None

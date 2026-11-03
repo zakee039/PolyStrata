@@ -110,6 +110,12 @@ class SessionV1:
                 PRIMARY KEY(session_id, model_key)
             )""")
             c.execute("CREATE INDEX IF NOT EXISTS ix_kv_model_seq ON kv_snapshots(model_key,seq)")
+            c.execute("""CREATE TABLE IF NOT EXISTS recent_generated_images (
+                session_id TEXT PRIMARY KEY,
+                image_file TEXT NOT NULL,
+                original_file TEXT NOT NULL DEFAULT '',
+                registered REAL NOT NULL
+            )""")
 
     @contextmanager
     def _db(self):
@@ -385,22 +391,97 @@ class SessionV1:
                             owned.add(name)
         return owned
 
+    def recent_generated_image(self, ident):
+        """Latest *selected* chat image, scoped to this conversation.
+
+        The authoritative image is registered by ChatImageHub upon generation;
+        arbitrary client-submitted web_messages cannot grant access to it.
+        History is used only to calculate how many turns have elapsed.
+        """
+        valid_id(ident)
+        with self.lock, self._db() as c:
+            record = c.execute("SELECT web_messages FROM conversations WHERE id=?", (ident,)).fetchone()
+            registered = c.execute("SELECT image_file,original_file FROM recent_generated_images "
+                                   "WHERE session_id=?", (ident,)).fetchone()
+        if record is None or registered is None:
+            return None
+        name = registered["image_file"]
+        if not GENERATED_IMAGE_FILE.fullmatch(name):
+            return None
+        path = self.generated_dir / name
+        if not path.is_file():
+            return None
+        original = registered["original_file"]
+        original_path = (self.generated_dir / original
+                         if original and GENERATED_IMAGE_FILE.fullmatch(original) else None)
+        if original_path is not None and not original_path.is_file():
+            original_path = None
+        messages = json.loads(record["web_messages"])
+        user_turns, found = 0, False
+        for msg in reversed(messages):
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") == "user":
+                user_turns += 1
+                continue
+            if msg.get("role") != "assistant":
+                continue
+            for t in reversed(msg.get("tools") or []):
+                if (isinstance(t, dict) and t.get("name") == "polystrata__generate_image"
+                        and t.get("ok") and t.get("image_file") == name):
+                    found = True
+                    break
+            if found:
+                break
+        # If the UI has not yet saved the tool result, this is still the most
+        # recent registered image; do not infer a past source from other tools.
+        return {"image_file": name, "path": original_path or path, "edit_path": original_path or path,
+                "user_turns_since": user_turns if found else 0}
+
+    def register_generated_image(self, ident, name, original=None):
+        """Record only a server-generated, existing PNG for a specific chat."""
+        valid_id(ident)
+        if not isinstance(name, str) or not GENERATED_IMAGE_FILE.fullmatch(name):
+            raise ValueError("invalid generated image name")
+        if not (self.generated_dir / name).is_file():
+            raise FileNotFoundError("generated image is missing")
+        if original:
+            if (not isinstance(original, str) or not GENERATED_IMAGE_FILE.fullmatch(original)
+                    or not (self.generated_dir / original).is_file()):
+                raise ValueError("invalid original generated image")
+        with self.lock, self._db() as c:
+            self._ensure(c, ident)
+            c.execute("INSERT INTO recent_generated_images(session_id,image_file,original_file,registered) "
+                      "VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET "
+                      "image_file=excluded.image_file,original_file=excluded.original_file,"
+                      "registered=excluded.registered",
+                      (ident, name, original or "", time.time()))
+
     def delete(self, ident):
         valid_id(ident)
         with self.lock, self._db() as c:
             row = c.execute("SELECT web_messages FROM conversations WHERE id=?", (ident,)).fetchone()
             generated = self._chat_generated_files(json.loads(row["web_messages"])) if row else set()
+            latest = c.execute("SELECT image_file,original_file FROM recent_generated_images "
+                               "WHERE session_id=?", (ident,)).fetchone()
+            if latest:
+                generated |= {name for name in (latest["image_file"], latest["original_file"])
+                              if name and GENERATED_IMAGE_FILE.fullmatch(name)}
             # Any remaining chat may link to the same PNG. Count references in
             # both message stores, including direct URL links, before deleting.
             if generated:
                 other_rows = c.execute("SELECT web_messages,api_messages FROM conversations "
                                        "WHERE id!=?", (ident,)).fetchall()
+                protected = {name for entry in c.execute(
+                    "SELECT image_file,original_file FROM recent_generated_images WHERE session_id!=?", (ident,))
+                    for name in (entry["image_file"], entry["original_file"]) if name}
                 generated = {name for name in generated
-                             if not any(name in other["web_messages"] or name in other["api_messages"]
+                             if name not in protected and not any(name in other["web_messages"] or name in other["api_messages"]
                                         for other in other_rows)}
             snapshots = self._kv_rows(c, ident)
             c.execute("DELETE FROM kv_snapshots WHERE session_id=?", (ident,))
             c.execute("DELETE FROM conversations WHERE id=?", (ident,))
+            c.execute("DELETE FROM recent_generated_images WHERE session_id=?", (ident,))
             if self.active_id == ident:
                 self.active_id = None
                 self.active_dirty = False

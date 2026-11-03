@@ -11,7 +11,8 @@ from PIL import Image
 from serve.character_cards import CharacterStore
 from unittest.mock import patch
 
-from serve.image_tools import ChatImageHub, NAME
+from serve.image_tools import (ChatImageHub, NAME, needs_recent_image,
+                              add_relevant_image, clearly_editing_recent_image)
 
 
 class FakeImage:
@@ -69,6 +70,178 @@ class ChatImageToolTests(unittest.TestCase):
                             and msg.get("image_file") for kind, msg in out))
         self.assertEqual(out[-1][0], "done")
         self.assertEqual(out[-1][1]["completion_tokens"], 42)
+
+    def test_image_tool_gets_one_vision_reply_without_thinking_or_tools(self):
+        from serve.frontend import Event, ToolCall
+        from serve.server import run_with_mcp, IMAGE_FOLLOWUP_MAX_TOKENS
+        call = ToolCall(name=NAME, arguments={"prompt": "Miku with a blue coat"})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "generated-images").mkdir()
+            image_name = "d" * 32 + ".png"
+            pic = io.BytesIO()
+            Image.new("RGB", (32, 32), (2, 32, 88)).save(pic, "PNG")
+            (root / "generated-images" / image_name).write_bytes(pic.getvalue())
+
+            class VisionService:
+                def __init__(self):
+                    self.vision = object()
+                    self.session_v1 = types.SimpleNamespace(root=root)
+                    self.turns = 0
+                    self.seen = []
+
+                def run(self, ids, thinking, tools, max_new, sampling, cancel):
+                    self.turns += 1
+                    self.seen.append((thinking, tools, max_new, sampling))
+                    if self.turns == 1:
+                        yield "event", Event("tool_call", call=call)
+                        yield "done", {"completion_tokens": 31, "finish": "stop"}
+                    else:
+                        yield "event", Event("content", "这件蓝外套很适合今天的天气。")
+                        yield "done", {"completion_tokens": 14, "finish": "stop"}
+
+                def prepare(self, messages, tools, kwargs, max_new, cancel=None):
+                    self.assert_called = True
+                    assert tools is None
+                    assert kwargs["enable_thinking"] is False
+                    assert max_new == 256
+                    last = messages[-1]
+                    assert last["role"] == "user"
+                    assert last["content"][-1] == {"type": "image", "source": str(root / "generated-images" / image_name)}
+                    return [11, 12, 13], False, 256
+
+            class Hub:
+                settings = {"max_rounds": 8}
+                def routes(self):
+                    return {NAME: (types.SimpleNamespace(name="PolyStrata"), "generate_image")}
+                def call(self, name, arguments, cancel):
+                    return {"ok": True, "image_file": image_name, "text": "Generated",
+                            "chars": 9, "ms": 9, "truncated": False}
+
+            svc = VisionService()
+            out = list(run_with_mcp(svc, Hub(),
+                                    [{"role": "user", "content": "Draw me wearing a blue coat"}],
+                                    [], {}, [1], True, 1600, 1600,
+                                    {"reasoning_budget_tokens": 1024, "reasoning_effort": "low",
+                                     "strata_session_id": "chat_1"},
+                                    threading.Event(), {NAME}))
+            self.assertEqual(svc.turns, 2)
+            self.assertEqual(out[-1][1]["completion_tokens"], 45)
+            self.assertEqual(out[-1][1]["prompt_tokens"], 4)
+            self.assertEqual(svc.seen[-1][:3], (False, None, IMAGE_FOLLOWUP_MAX_TOKENS))
+            self.assertEqual(svc.seen[-1][3]["reasoning_budget_tokens"], 0)
+            self.assertEqual(svc.seen[-1][3]["answer_budget_tokens"], 256)
+            self.assertNotIn("strata_session_id", svc.seen[-1][3])
+            self.assertTrue(any(kind == "event" and x.kind == "content" and "蓝外套" in x.text
+                                for kind, x in out))
+
+    def test_image_visual_reply_failure_falls_back_without_retrying_generation(self):
+        from serve.frontend import Event, ToolCall
+        from serve.server import run_with_mcp
+        call = ToolCall(name=NAME, arguments={"prompt": "image"})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "generated-images").mkdir()
+            img = "a" * 32 + ".png"
+            (root / "generated-images" / img).write_bytes(b"png")
+
+            class Service:
+                vision = object()
+                session_v1 = types.SimpleNamespace(root=root)
+                turns = 0
+                def run(self, *args, **kwargs):
+                    self.turns += 1
+                    yield "event", Event("tool_call", call=call)
+                    yield "done", {"completion_tokens": 5, "finish": "stop"}
+                def prepare(self, *args, **kwargs):
+                    raise ValueError("vision unavailable")
+
+            class Hub:
+                settings = {"max_rounds": 8}
+                def routes(self):
+                    return {NAME: (types.SimpleNamespace(name="PolyStrata"), "generate_image")}
+                def call(self, *args):
+                    return {"ok": True, "image_file": img, "text": "Generated",
+                            "chars": 9, "ms": 9, "truncated": False}
+
+            svc = Service()
+            out = list(run_with_mcp(svc, Hub(), [], [], {}, [1], False, 256, 256,
+                                    {}, threading.Event(), {NAME}))
+            self.assertEqual(svc.turns, 1)
+            self.assertTrue(any(kind == "event" and x.kind == "content" and "图片已生成" in x.text
+                                for kind, x in out))
+
+    def test_recent_picture_is_only_attached_for_visual_references(self):
+        class Sessions:
+            def recent_generated_image(self, ident):
+                self.last_ident = ident
+                return {"path": Path("mock-saved-picture.png"), "user_turns_since": 1}
+
+        sessions = Sessions()
+        svc = types.SimpleNamespace(session_v1=sessions, vision=object())
+        original = [{"role": "user", "content": "晚安"}]
+        self.assertIs(add_relevant_image(svc, "my_chat", original), original)
+        self.assertFalse(needs_recent_image("今天天气怎么样？", 1))
+        for text in ("眼睛再大一点", "你今天穿的外套好漂亮", "请修改刚才的图片",
+                     "The blue coat in that picture is cute"):
+            modified = add_relevant_image(svc, "my_chat", [{"role": "user", "content": text}])
+            self.assertEqual(modified[-1]["content"][-1]["type"], "image")
+            self.assertEqual(sessions.last_ident, "my_chat")
+        self.assertFalse(needs_recent_image("眼睛再大一点", 12))
+        self.assertTrue(needs_recent_image("刚才那张图片", 12))
+        self.assertTrue(clearly_editing_recent_image("眼睛再大一点", 1))
+        self.assertFalse(clearly_editing_recent_image("你今天穿的外套好漂亮", 1))
+        self.assertFalse(clearly_editing_recent_image("再画一张新的，眼睛更大", 1))
+        self.assertEqual(add_relevant_image(svc, "my_chat",
+            [{"role": "user", "content": [{"type": "text", "text": "改图"},
+                                            {"type": "image", "source": "user_image"}]}])[-1]["content"][-1]["source"], "user_image")
+
+    def test_edit_last_generated_picture_uses_its_real_image_reference(self):
+        from serve.session_v1 import SessionV1
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "chat"
+            store = SessionV1(str(root))
+            prev = "f" * 32 + ".png"
+            buf = io.BytesIO()
+            Image.new("RGB", (96, 96), (220, 10, 10)).save(buf, "PNG")
+            (store.generated_dir / prev).write_bytes(buf.getvalue())
+            store.store_web("first", [
+                {"role": "assistant", "tools": [
+                    {"name": NAME, "ok": True, "image_file": prev}]}])
+            store.register_generated_image("first", prev)
+            svc = self.make_service()
+            svc.session_v1 = store
+            svc.images.cfg["llm_vision"] = "mmproj.gguf"
+            def store_output(data):
+                name = "a" * 32 + ".png"
+                (store.generated_dir / name).write_bytes(buf.getvalue())  # valid fixture PNG
+                return name
+            svc.images.store = store_output
+
+            @contextlib.contextmanager
+            def mocked_turn(*args):
+                yield "unload"
+
+            with patch("serve.image_tools.images_api.gpu_turn", mocked_turn):
+                hub = ChatImageHub(svc, session_id="first")
+                reply = hub.call(NAME, {"prompt": "make eyes bigger", "edit_previous": True,
+                                        "character_related": True}, threading.Event())
+            self.assertTrue(reply["ok"], reply)
+            self.assertTrue(reply["edited_previous"])
+            self.assertTrue(svc.images.calls[-1]["reference_png"].startswith(b"\x89PNG"))
+            self.assertIn("Preserve", svc.images.calls[-1]["prompt"])
+            self.assertFalse(reply["character_reference_used"])
+            with patch("serve.image_tools.images_api.gpu_turn", mocked_turn):
+                auto = ChatImageHub(svc, session_id="first", latest_user_text="眼睛再大一点").call(
+                    NAME, {"prompt": "make the eyes bigger"}, threading.Event())
+            self.assertTrue(auto["ok"], auto)
+            self.assertTrue(auto["edited_previous"])
+            # A different conversation cannot import the picture by guessing its filename.
+            with patch("serve.image_tools.images_api.gpu_turn", mocked_turn):
+                no_image = ChatImageHub(svc, session_id="other").call(
+                    NAME, {"prompt": "make eyes bigger", "edit_previous": True}, threading.Event())
+            self.assertFalse(no_image["ok"])
+            self.assertIn("no previous generated picture", no_image["text"])
 
     def test_failed_image_tool_also_stops_without_infinite_retry(self):
         from serve.frontend import Event, ToolCall

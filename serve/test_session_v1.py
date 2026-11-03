@@ -163,6 +163,58 @@ class TestSessionV1(unittest.TestCase):
         self.store.delete("untrusted")
         self.assertTrue(png.exists())
 
+    def test_recent_picture_is_conversation_scoped_and_ignores_swipes(self):
+        a, b, stale = ("a" * 32 + ".png", "b" * 32 + ".png", "c" * 32 + ".png")
+        for name in (a, b, stale):
+            (self.store.generated_dir / name).write_bytes(b"png bytes")
+        self.store.store_web("chat_a", [
+            {"role": "user", "text": "draw"},
+            {"role": "assistant", "text": "ready", "tools": [
+                {"name": "polystrata__generate_image", "ok": True, "image_file": a}],
+             "swipes": [{"tools": [
+                 {"name": "polystrata__generate_image", "ok": True, "image_file": stale}]}]},
+            {"role": "user", "text": "make the eyes bigger"}])
+        self.store.store_web("chat_b", [
+            {"role": "user", "text": "draw a different picture"},
+            {"role": "assistant", "tools": [
+                {"name": "polystrata__generate_image", "ok": True, "image_file": b}]}])
+        self.store.register_generated_image("chat_a", a)
+        self.store.register_generated_image("chat_b", b)
+        x = self.store.recent_generated_image("chat_a")
+        self.assertEqual(x["image_file"], a)
+        self.assertEqual(x["user_turns_since"], 1)
+        self.assertEqual(self.store.recent_generated_image("chat_b")["image_file"], b)
+        self.assertIsNone(self.store.recent_generated_image("unknown_chat"))
+        (self.store.generated_dir / a).unlink()
+        self.assertIsNone(self.store.recent_generated_image("chat_a"))
+
+    def test_recent_picture_rejects_user_paths_or_untrusted_tool_outputs(self):
+        target = "e" * 32 + ".png"
+        (self.store.generated_dir / target).write_bytes(b"private picture")
+        self.store.store_web("malicious", [
+            {"role": "user", "text": "image", "image_file": target},
+            {"role": "assistant", "tools": [
+                {"name": "other_tool", "ok": True, "image_file": target},
+                {"name": "polystrata__generate_image", "ok": True, "image_file": "../" + target},
+                {"name": "polystrata__generate_image", "ok": False, "image_file": target}]}])
+        self.assertIsNone(self.store.recent_generated_image("malicious"))
+        with self.assertRaises(ValueError):
+            self.store.register_generated_image("malicious", "../" + target)
+        with self.assertRaises(FileNotFoundError):
+            self.store.register_generated_image("malicious", "9" * 32 + ".png")
+
+    def test_recent_picture_registration_cleans_on_delete_but_keeps_other_owner(self):
+        name = "7" * 32 + ".png"
+        pic = self.store.generated_dir / name
+        pic.write_bytes(b"png")
+        self.store.register_generated_image("first", name)
+        self.store.register_generated_image("second", name)
+        self.store.delete("first")
+        self.assertTrue(pic.exists())
+        self.assertEqual(self.store.recent_generated_image("second")["image_file"], name)
+        self.store.delete("second")
+        self.assertFalse(pic.exists())
+
     def test_invalid_identifiers(self):
         for ident in ("../escape", "/tmp/p", "a.b", "", "a" * 65):
             with self.assertRaises(ValueError):
