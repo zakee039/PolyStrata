@@ -1,10 +1,15 @@
-"""PolyStrata V1 local conversations, image/file assets and disposable FIFO KV snapshots.
+"""Mikuchin's local conversation store and model-independent file assets.
 
-All persistent content belongs to the deployment directory:
-  chat-history/conversations.sqlite3
-  chat-history/images/<session-id>/<sha256>.<extension>
-  chat-history/attachments/<session-id>/<sha256>.txt
-  kv-cache/<session-id>.bin
+All runtime chat data belongs under <mikuchin>/chat:
+  conversations.sqlite3
+  images/<session-id>/<sha256>.<extension>
+  attachments/<session-id>/<sha256>.txt
+  generated-images/<opaque>.png
+  kv-cache/<model-key>/<session-id>.bin
+  image-session-cache/llm-session-<opaque>.bin (temporary)
+
+Character profiles and reference pictures belong under <mikuchin>/character.
+This store does not migrate or read old standalone PolyStrata data.
 """
 from __future__ import annotations
 
@@ -65,6 +70,13 @@ class SessionV1:
         self.attachments_dir.mkdir(exist_ok=True)
         self.kv_dir = Path(kv_directory).resolve() if kv_directory else self.root / "kv-cache"
         self.kv_dir.mkdir(parents=True, exist_ok=True)
+        # Image-turn KV is ephemeral, never an image. Fresh deployments only
+        # reclaim abandoned temporary snapshots in their dedicated directory.
+        image_cache = self.root / "image-session-cache"
+        if image_cache.is_dir():
+            for stale in image_cache.glob("llm-session-*.bin"):
+                if re.fullmatch(r"llm-session-[0-9a-f]{12}\.bin", stale.name):
+                    stale.unlink(missing_ok=True)
         self.db_path = self.root / "conversations.sqlite3"
         self.lock = threading.RLock()
         self.max_snapshots = max(1, min(int(max_snapshots), 5))
@@ -79,16 +91,10 @@ class SessionV1:
                 updated REAL NOT NULL,
                 api_messages TEXT NOT NULL DEFAULT '[]',
                 web_messages TEXT NOT NULL DEFAULT '[]',
-                snapshot_seq INTEGER NOT NULL DEFAULT 0,
-                snapshot_model TEXT NOT NULL DEFAULT '',
-                snapshot_tokens INTEGER NOT NULL DEFAULT 0
+                pinned INTEGER NOT NULL DEFAULT 0,
+                content_rev INTEGER NOT NULL DEFAULT 0
             )""")
             c.execute("CREATE INDEX IF NOT EXISTS ix_conv_updated ON conversations(updated DESC)")
-            columns = {x["name"] for x in c.execute("PRAGMA table_info(conversations)")}
-            if "pinned" not in columns:
-                c.execute("ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
-            if "content_rev" not in columns:
-                c.execute("ALTER TABLE conversations ADD COLUMN content_rev INTEGER NOT NULL DEFAULT 0")
             c.execute("""CREATE TABLE IF NOT EXISTS kv_snapshots (
                 session_id TEXT NOT NULL,
                 model_key TEXT NOT NULL,
@@ -99,27 +105,6 @@ class SessionV1:
                 PRIMARY KEY(session_id, model_key)
             )""")
             c.execute("CREATE INDEX IF NOT EXISTS ix_kv_model_seq ON kv_snapshots(model_key,seq)")
-            # Import old global 5-slot metadata. Move only known snapshot files;
-            # never discard unrelated binaries during a schema upgrade.
-            legacy = c.execute("SELECT id,snapshot_model,snapshot_seq,snapshot_tokens,content_rev "
-                               "FROM conversations WHERE snapshot_seq>0 AND snapshot_model!=''").fetchall()
-            for row in legacy:
-                if c.execute("SELECT 1 FROM kv_snapshots WHERE session_id=? AND model_key=?",
-                             (row["id"], row["snapshot_model"])).fetchone():
-                    continue
-                old = self.kv_dir / (row["id"] + ".bin")
-                if not old.is_file():
-                    continue
-                target = self._model_path(row["id"], row["snapshot_model"])
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if not target.exists():
-                    os.replace(old, target)
-                c.execute("INSERT OR IGNORE INTO kv_snapshots VALUES(?,?,?,?,?,?)",
-                          (row["id"],row["snapshot_model"],row["snapshot_seq"],
-                           row["snapshot_tokens"],0,row["content_rev"]))
-            # Old metadata no longer owns the KV file.
-            c.execute("UPDATE conversations SET snapshot_seq=0,snapshot_model='',snapshot_tokens=0 "
-                      "WHERE snapshot_seq>0")
 
     @contextmanager
     def _db(self):
@@ -265,15 +250,9 @@ class SessionV1:
         name = hashlib.sha256(str(model).encode("utf-8")).hexdigest()[:24]
         return self.kv_dir / name / (valid_id(ident) + ".bin")
 
-    def snapshot_path(self, ident, model=None):
+    def snapshot_path(self, ident, model):
         valid_id(ident)
-        if model is not None:
-            return self._model_path(ident, model)
-        # Compatibility for callers of the original single-model API.
-        with self.lock, self._db() as c:
-            row = c.execute("SELECT model_key FROM kv_snapshots WHERE session_id=? "
-                            "ORDER BY locked DESC,seq DESC LIMIT 1", (ident,)).fetchone()
-        return self._model_path(ident, row[0]) if row else self.kv_dir / (ident + ".bin")
+        return self._model_path(ident, model)
 
     def _kv_rows(self, c, ident, model=None):
         if model is None:
@@ -381,7 +360,6 @@ class SessionV1:
                 self.active_dirty = False
             for row in snapshots:
                 self._model_path(ident, row["model_key"]).unlink(missing_ok=True)
-            (self.kv_dir / (ident + ".bin")).unlink(missing_ok=True)
             for name in generated:
                 # Validated opaque basenames only; never traverse other paths.
                 (self.generated_dir / name).unlink(missing_ok=True)
@@ -448,10 +426,6 @@ class SessionV1:
             rev = c.execute("SELECT content_rev FROM conversations WHERE id=?", (ident,)).fetchone()[0]
             path = self._model_path(ident, model)
             path.parent.mkdir(parents=True, exist_ok=True)
-            # Preserve older session_file callers that saved to the unscoped path.
-            legacy = self.kv_dir / (ident + ".bin")
-            if legacy.is_file() and not path.is_file():
-                os.replace(legacy, path)
             if not path.is_file():
                 raise FileNotFoundError("KV snapshot not written by engine")
             row = c.execute("SELECT seq FROM kv_snapshots WHERE session_id=? AND model_key=?",

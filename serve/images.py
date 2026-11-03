@@ -427,19 +427,18 @@ class ImageGen:
 def service_image_file(svc, name: str) -> Path | None:
     """Resolve an opaque PNG id across Chat and Images, including after restart.
 
-    SessionV1's generated-images directory is the durable, shared source of
-    truth. ImageGen.dir starts as a new temporary folder after each restart,
-    and each image model has its own ImageGen object: looking only in
-    svc.images.file(name) therefore loses otherwise valid conversation images.
+    With SessionV1 enabled the generated-images directory is the sole source
+    of truth for all Chat and Images outputs. No old temporary-directory
+    fallback is used in Mikuchin deployments.
     """
     if not isinstance(name, str) or FILE_NAME.fullmatch(name) is None:
         return None
     sessions = getattr(svc, "session_v1", None)
     if sessions is not None:
         path = sessions.root / "generated-images" / name
-        if path.is_file():
-            return path
-    # Maintain support for no-SessionV1 deployments and pre-migration outputs.
+        return path if path.is_file() else None
+    # PolyStrata can also run without SessionV1; its own generator then owns
+    # the outputs. This is normal standalone operation, not a migration shim.
     default = getattr(svc, "images", None)
     generators = ([default] if default is not None else [])
     generators += list(getattr(svc, "image_profiles", {}).values())
@@ -546,7 +545,13 @@ def _make_room(svc, gen: ImageGen, policy: str, need: int):
     if policy == "unload":
         saved = None
         if hasattr(eng, "session_file") and not getattr(eng, "batch", 0):
-            path = str(gen.dir / f"llm-session-{secrets.token_hex(6)}.bin")
+            # A KV snapshot is not a generated image. Keep it in the session
+            # cache namespace, never alongside user-owned PNGs.
+            sessions = getattr(svc, "session_v1", None)
+            transient_dir = ((sessions.root / "image-session-cache") if sessions is not None
+                             else Path(tempfile.gettempdir()) / "polystrata-image-turn")
+            transient_dir.mkdir(parents=True, exist_ok=True)
+            path = str(transient_dir / f"llm-session-{secrets.token_hex(6)}.bin")
             try:
                 r = eng.session_file("save", path)
                 saved = path
@@ -571,6 +576,10 @@ def _give_back(svc, gen: ImageGen, policy: str, restore) -> None:
             gen._say(f"image job: the expert cache did not grow back ({e}); POST /v1/vram can retry")
     elif policy == "unload" and restore:
         if restore != "unloaded":
+            previous = getattr(svc, "restore_after_load", None)
+            if previous and previous != restore:
+                with contextlib.suppress(OSError):
+                    os.unlink(previous)
             svc.restore_after_load = restore         # Service.ensure_loaded restores it after the next start
         if gen.reload == "eager":
             try:

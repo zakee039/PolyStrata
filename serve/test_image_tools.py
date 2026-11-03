@@ -38,6 +38,69 @@ class ChatImageToolTests(unittest.TestCase):
         self.assertEqual(hub.template_tools(), [])
         self.assertEqual(hub.routes(), {})
 
+    def test_image_tool_result_completes_without_a_second_model_round(self):
+        from serve.frontend import Event, ToolCall
+        from serve.server import run_with_mcp
+        from types import SimpleNamespace
+        call = ToolCall(name=NAME, arguments={"prompt": "Miku at breakfast"})
+
+        class FakeService:
+            turns = 0
+            def run(self, *args):
+                self.turns += 1
+                yield "event", Event("tool_call", call=call)
+                yield "done", {"completion_tokens": 42, "finish": "stop"}
+            def prepare(self, *args, **kwargs):
+                raise AssertionError("No second inference after image result")
+
+        class FakeHub:
+            settings = {"max_rounds": 8}
+            def routes(self):
+                return {NAME: (SimpleNamespace(name="PolyStrata"), "generate_image")}
+            def call(self, name, arguments, cancel):
+                return {"ok": True, "text": "Generated image", "chars": 15,
+                        "truncated": False, "ms": 20, "image_file": "a" * 32 + ".png"}
+
+        svc = FakeService()
+        out = list(run_with_mcp(svc, FakeHub(), [], [], {}, [1], False, 100, 100,
+                                {}, threading.Event(), {NAME}))
+        self.assertEqual(svc.turns, 1)
+        self.assertTrue(any(kind == "mcp" and msg.get("event") == "result"
+                            and msg.get("image_file") for kind, msg in out))
+        self.assertEqual(out[-1][0], "done")
+        self.assertEqual(out[-1][1]["completion_tokens"], 42)
+
+    def test_failed_image_tool_also_stops_without_infinite_retry(self):
+        from serve.frontend import Event, ToolCall
+        from serve.server import run_with_mcp
+        from types import SimpleNamespace
+        call = ToolCall(name=NAME, arguments={"prompt": "Miku"})
+
+        class FailedService:
+            turns = 0
+            def run(self, *args):
+                self.turns += 1
+                yield "event", Event("tool_call", call=call)
+                yield "done", {"completion_tokens": 20, "finish": "stop"}
+            def prepare(self, *args, **kwargs):
+                raise AssertionError("Failed images must not be re-generated")
+
+        class FailedHub:
+            settings = {"max_rounds": 8}
+            def routes(self):
+                return {NAME: (SimpleNamespace(name="PolyStrata"), "generate_image")}
+            def call(self, name, arguments, cancel):
+                return {"ok": False, "text": "error: model missing",
+                        "chars": 20, "truncated": False, "ms": 10}
+
+        svc = FailedService()
+        result = list(run_with_mcp(svc, FailedHub(), [], [], {}, [1], False, 100, 100,
+                                   {}, threading.Event(), {NAME}))
+        self.assertEqual(svc.turns, 1)
+        self.assertTrue(any(kind == "event" and "图像生成失败" in obj.text
+                            for kind, obj in result))
+        self.assertEqual(result[-1][0], "done")
+
     def test_schema_is_opt_in_and_has_fixed_name(self):
         hub = ChatImageHub(self.make_service())
         tools = hub.template_tools()
@@ -68,13 +131,13 @@ class ChatImageToolTests(unittest.TestCase):
 
     def test_role_weak_reference_only_when_character_related(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = CharacterStore(tmp)
+            store = CharacterStore(Path(tmp) / "character")
             card = store.save({"name": "Miku", "description": "teal twin tails"})
             buf = io.BytesIO();Image.new("RGB",(64,64),(35,180,190)).save(buf,"PNG")
             store.upload_reference(card["id"],base64.b64encode(buf.getvalue()).decode())
             store.assign("chat_sess1",card["id"])
             svc=self.make_service()
-            svc.session_v1=types.SimpleNamespace(root=Path(tmp))
+            svc.session_v1=types.SimpleNamespace(root=Path(tmp) / "chat")
             svc.images.cfg["llm_vision"]="test-mmproj.gguf"
             @contextlib.contextmanager
             def mocked_turn(svc_arg, gen, job, cancel):
@@ -106,7 +169,7 @@ class ChatImageToolTests(unittest.TestCase):
 
     def test_chat_model_switch_without_changing_page_or_character_policy(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = CharacterStore(tmp)
+            store = CharacterStore(Path(tmp) / "character")
             card = store.save({"name":"Miku", "description":"teal twin tails"})
             buf = io.BytesIO();Image.new("RGB",(64,64),(35,180,190)).save(buf,"PNG")
             store.upload_reference(card["id"],base64.b64encode(buf.getvalue()).decode())
@@ -114,7 +177,7 @@ class ChatImageToolTests(unittest.TestCase):
             svc = self.make_service()
             svc.images.cfg.update({"profile_id":"qwen-image-2.1-turbo-official",
                                    "llm_vision":"mmproj.gguf", "model_name":"official"})
-            svc.session_v1=types.SimpleNamespace(root=Path(tmp))
+            svc.session_v1=types.SimpleNamespace(root=Path(tmp) / "chat")
             selected = FakeImage()
             # SDXL may inherit the default Qwen mmproj key in resolved configs;
             # it must still NEVER auto-apply a character picture via img2img.

@@ -11,6 +11,11 @@ class TestSessionV1(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.store = SessionV1(self.tmp.name, max_snapshots=5)
 
+    def _snapshot(self, ident, model):
+        path = self.store.snapshot_path(ident, model)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
     def test_web_and_api_same_record(self):
         self.store.store_web("shared_1", [{"role": "user", "text": "web content"}])
         self.store.store_api("shared_1", [{"role": "user", "content": "api content"}])
@@ -24,21 +29,21 @@ class TestSessionV1(unittest.TestCase):
         for n in range(6):
             ident = f"chat_{n}"
             self.store.store_web(ident, [{"role": "user", "text": ident}])
-            self.store.snapshot_path(ident).write_bytes(b"dummy snapshot")
+            self._snapshot(ident, "same-model").write_bytes(b"dummy snapshot")
             self.store.registered_snapshot(ident, "same-model", 1024)
         self.assertEqual(self.store.snapshot_count(), 5)
-        self.assertFalse(self.store.snapshot_path("chat_0").exists())
+        self.assertFalse(self._snapshot("chat_0", "same-model").exists())
         self.assertTrue(self.store.get("chat_0")["web_messages"])
-        self.assertEqual(self.store.get("chat_0")["snapshot_seq"], 0)
-        self.store.snapshot_path("chat_0").write_bytes(b"fresh")
+        self.assertFalse(self.store.get("chat_0")["kv_cached"])
+        self._snapshot("chat_0", "same-model").write_bytes(b"fresh")
         self.store.registered_snapshot("chat_0", "same-model", 2048)
         self.assertEqual(self.store.snapshot_count(), 5)
-        self.assertFalse(self.store.snapshot_path("chat_1").exists())
+        self.assertFalse(self._snapshot("chat_1", "same-model").exists())
         self.assertTrue(self.store.get("chat_1")["web_messages"])
 
     def test_restart_and_incompatible_snapshot(self):
         self.store.store_web("same_1", [{"role": "user", "text": "saved"}])
-        self.store.snapshot_path("same_1").write_bytes(b"placeholder")
+        self._snapshot("same_1", "v1").write_bytes(b"placeholder")
         self.store.registered_snapshot("same_1", "v1", 500)
         reopened = SessionV1(self.tmp.name)
         self.assertEqual(reopened.get("same_1")["web_messages"][0]["text"], "saved")
@@ -162,6 +167,19 @@ class TestSessionV1(unittest.TestCase):
         for ident in ("../escape", "/tmp/p", "a.b", "", "a" * 65):
             with self.assertRaises(ValueError):
                 valid_id(ident)
+
+    def test_restart_reclaims_image_turn_snapshots_without_touching_pictures(self):
+        from pathlib import Path
+        root = Path(self.tmp.name)
+        current_dir = root / "image-session-cache"
+        current_dir.mkdir(parents=True, exist_ok=True)
+        recent = current_dir / ("llm-session-" + "b" * 12 + ".bin")
+        picture = root / "generated-images" / ("c" * 32 + ".png")
+        for file in (recent, picture):
+            file.write_bytes(b"fixture")
+        SessionV1(self.tmp.name)
+        self.assertFalse(recent.exists())
+        self.assertTrue(picture.exists())
 
 
 if __name__ == "__main__":

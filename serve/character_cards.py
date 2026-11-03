@@ -1,7 +1,6 @@
-"""Small persistent character-card and keyword-lorebook store for the first-party chat.
+"""Mikuchin character cards with human-readable per-character directories.
 
-No model engine changes. Existing OpenAI-compatible requests remain untouched.
-SQLite file sits next to SessionV1's server-owned conversations database.
+All role data lives under <mikuchin>/character, separate from chat sessions.
 """
 from __future__ import annotations
 
@@ -17,6 +16,8 @@ from uuid import uuid4
 
 CARD_ID = re.compile(r"^[a-f0-9]{32}$")
 SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+WINDOWS_FORBIDDEN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+WINDOWS_RESERVED = re.compile(r'^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$', re.I)
 FIELDS = {"name": 80, "description": 6000, "personality": 4000,
           "scenario": 4000, "first_mes": 3000, "mes_example": 4000}
 MAX_CARDS = 200
@@ -39,6 +40,9 @@ def valid_card(data: object) -> dict:
     card = {f: _text(data.get(f, ""), limit, f) for f, limit in FIELDS.items()}
     if not card["name"]:
         raise ValueError("character name is required")
+    if (card["name"] in (".", "..") or WINDOWS_FORBIDDEN.search(card["name"])
+            or card["name"].endswith((".", " ")) or WINDOWS_RESERVED.fullmatch(card["name"])):
+        raise ValueError("character name cannot contain Windows filename reserved characters")
     ident = data.get("id") or uuid4().hex
     if not isinstance(ident, str) or not CARD_ID.fullmatch(ident):
         raise ValueError("invalid character id")
@@ -125,8 +129,9 @@ def card_to_tavern(card: dict) -> dict:
 
 class CharacterStore:
     def __init__(self, root: str | Path):
-        self.path = Path(root) / "character_cards.sqlite3"
-        self.image_dir = Path(root) / "character_images"
+        self.root = Path(root)
+        self.path = self.root / "character_cards.sqlite3"
+        self.characters_dir = self.root
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._db() as db:
             db.execute("CREATE TABLE IF NOT EXISTS cards (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
@@ -136,6 +141,20 @@ class CharacterStore:
                        "session_id TEXT NOT NULL, card_id TEXT NOT NULL, "
                        "snapshot TEXT NOT NULL, initialized INTEGER NOT NULL DEFAULT 0, "
                        "PRIMARY KEY (session_id, card_id))")
+
+    def _reference_path(self, ident: str) -> Path:
+        if not CARD_ID.fullmatch(ident):
+            raise ValueError("invalid character id")
+        card = self.get(ident)
+        if card is None:
+            raise ValueError("character not found")
+        return self.characters_dir / card["name"] / "reference.png"
+
+    def _remove_reference_file(self, ident: str) -> None:
+        path = self._reference_path(ident)
+        path.unlink(missing_ok=True)
+        if path.parent.is_dir() and not any(path.parent.iterdir()):
+            path.parent.rmdir()
 
     @contextmanager
     def _db(self):
@@ -166,19 +185,43 @@ class CharacterStore:
             n = db.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
             existing = db.execute("SELECT data FROM cards WHERE id=?", (card["id"],)).fetchone()
             exists = existing is not None
+            previous = json.loads(existing[0]) if existing else None
+            names = [(row[0], json.loads(row[1])["name"]) for row in
+                     db.execute("SELECT id,data FROM cards")]
+            if any(ident != card["id"] and name.casefold() == card["name"].casefold()
+                   for ident, name in names):
+                raise ValueError("another character already uses this name")
             # Do not trust reference_image from form JSON: only validated uploads set it.
-            card["reference_image"] = bool(existing and json.loads(existing[0]).get("reference_image"))
+            card["reference_image"] = bool(previous and previous.get("reference_image"))
             if not exists and n >= MAX_CARDS:
                 raise ValueError("maximum 200 character cards reached")
-            db.execute("INSERT OR REPLACE INTO cards(id,data) VALUES(?,?)",
-                       (card["id"], json.dumps(card, ensure_ascii=False)))
+            dest = self.characters_dir / card["name"]
+            old_dir = self.characters_dir / previous["name"] if previous else None
+            renamed = False
+            # A manually maintained character/<name> folder (e.g. miku/)
+            # may predate the UI card. It is the intended location, not a
+            # conflicting legacy data root.
+            if old_dir is not None and old_dir != dest and dest.exists():
+                raise ValueError("character folder already exists")
+            try:
+                if old_dir and old_dir.is_dir() and old_dir != dest:
+                    old_dir.rename(dest)
+                    renamed = True
+                else:
+                    dest.mkdir(parents=True, exist_ok=True)
+                db.execute("INSERT OR REPLACE INTO cards(id,data) VALUES(?,?)",
+                           (card["id"], json.dumps(card, ensure_ascii=False)))
+            except Exception:
+                if renamed and old_dir is not None and dest.exists():
+                    dest.rename(old_dir)
+                raise
         return card
 
     def image_file(self, ident: str) -> Path | None:
         if not isinstance(ident, str) or not CARD_ID.fullmatch(ident):
             raise ValueError("invalid character id")
         card = self.get(ident)
-        file = self.image_dir / (ident + ".png")
+        file = self._reference_path(ident)
         return file if card and card.get("reference_image") and file.is_file() else None
 
     def upload_reference(self, ident: str, encoded: object) -> dict:
@@ -212,9 +255,9 @@ class CharacterStore:
             raise ValueError("invalid or unsupported image") from e
         if len(payload) > 8 * 1024 * 1024:
             raise ValueError("processed image exceeds 8 MB")
-        self.image_dir.mkdir(parents=True, exist_ok=True)
-        dest = self.image_dir / (ident + ".png")
-        temp = self.image_dir / (ident + ".tmp")
+        dest = self._reference_path(ident)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        temp = dest.with_suffix(".tmp")
         try:
             temp.write_bytes(payload)
             temp.replace(dest)
@@ -237,18 +280,23 @@ class CharacterStore:
                 raise ValueError("character not found")
             card = json.loads(current[0]);card["reference_image"] = False
             db.execute("UPDATE cards SET data=? WHERE id=?",(json.dumps(card,ensure_ascii=False),ident))
-        (self.image_dir / (ident + ".png")).unlink(missing_ok=True)
+        self._remove_reference_file(ident)
         return card
 
     def remove(self, ident: str) -> None:
         if not isinstance(ident, str) or not CARD_ID.fullmatch(ident):
             raise ValueError("invalid character id")
+        folder = self._reference_path(ident).parent
         with self._db() as db:
             db.execute("DELETE FROM cards WHERE id=?", (ident,))
             db.execute("DELETE FROM assignments WHERE card_id=?", (ident,))
             db.execute("DELETE FROM workflow_sessions WHERE card_id=?", (ident,))
             db.execute("UPDATE options SET value='stateless' WHERE key='default_role' AND value=?", (ident,))
-        (self.image_dir / (ident + ".png")).unlink(missing_ok=True)
+        # The card row no longer exists; use the validated path captured
+        # before the database delete instead of looking it up again.
+        (folder / "reference.png").unlink(missing_ok=True)
+        if folder.is_dir() and not any(folder.iterdir()):
+            folder.rmdir()
 
     def assign(self, session: str, ident: str | None) -> None:
         if not isinstance(session, str) or not SESSION_ID.fullmatch(session):

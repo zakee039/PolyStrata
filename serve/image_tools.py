@@ -55,7 +55,7 @@ class ChatImageHub:
         cards = None
         if self.gen is not None and getattr(svc, "session_v1", None) is not None:
             from serve.character_cards import CharacterStore
-            cards = CharacterStore(svc.session_v1.root)
+            cards = CharacterStore(svc.session_v1.root.parent / "character")
             selected = cards.chat_image_profile()
             profiles = getattr(svc, "image_profiles", {})
             if selected in ("default", self.profile_id):
@@ -174,6 +174,8 @@ class ChatImageHub:
         except Exception as exc:
             output["ok"] = False
             output["text"] = f"error: image generation failed: {str(exc)[:500]}"
+            if self.gen is not None and hasattr(self.gen, "_say"):
+                self.gen._say(f"chat image tool failed: {type(exc).__name__}: {str(exc)[:240]}")
         output["chars"] = len(output["text"])
         output["ms"] = int((time.monotonic() - start) * 1000)
         return output

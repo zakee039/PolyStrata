@@ -31,6 +31,7 @@ class CharacterTests(unittest.TestCase):
             self.assertTrue(uploaded["reference_image"])
             file = store.image_file(card["id"])
             self.assertTrue(file and file.is_file())
+            self.assertEqual(file.parts[-2:], ("Test Miku", "reference.png"))
             with Image.open(file) as actual:
                 self.assertEqual(actual.size, (320, 640))
             edited = store.save({"id":card["id"],"name":"Updated Miku"})
@@ -46,6 +47,29 @@ class CharacterTests(unittest.TestCase):
             store.upload_reference(card["id"], base64.b64encode(image_data.getvalue()).decode())
             store.remove(card["id"])
             self.assertFalse(file.exists())
+
+    def test_reference_lives_beside_existing_named_role_files(self):
+        from pathlib import Path
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "character"
+            folder = root / "miku"
+            folder.mkdir(parents=True)
+            (folder / "profile.yaml").write_text("name: miku\n", encoding="utf-8")
+            store = CharacterStore(root)
+            card = store.save({"name": "miku"})
+            self.assertTrue((folder / "profile.yaml").exists())
+            stream = io.BytesIO()
+            Image.new("RGB", (32, 32), (10, 160, 180)).save(stream, format="PNG")
+            store.upload_reference(card["id"], base64.b64encode(stream.getvalue()).decode())
+            self.assertEqual(store.image_file(card["id"]), folder / "reference.png")
+            self.assertTrue((root / "character_cards.sqlite3").exists())
+            edited = store.save({"id": card["id"], "name": "miku-renamed"})
+            self.assertEqual(store.image_file(card["id"]), root / "miku-renamed" / "reference.png")
+            self.assertTrue((root / "miku-renamed" / "profile.yaml").exists())
+            store.remove(edited["id"])
+            self.assertFalse((root / "miku-renamed" / "reference.png").exists())
+            self.assertTrue((root / "miku-renamed" / "profile.yaml").exists())
 
     def test_persistence_assignment_and_deletion(self):
         with tempfile.TemporaryDirectory() as tmp:

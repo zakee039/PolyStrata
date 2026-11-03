@@ -5490,8 +5490,23 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
                               "upscale_applied": r.get("upscale_applied", False),
                               "upscale_fallback": r.get("upscale_fallback", False)}
                              if r.get("image_file") else {})}
+            # Chat embeds the generated image directly from the tool result.
+            # Continuing inference merely to say it was generated can enter a
+            # huge reasoning-only turn (tens of thousands of invisible tokens).
+            # Failed single-image calls also stop, rather than retrying
+            # autonomously and consuming the remaining reasoning budget.
+            if len(calls) == 1 and c.name == "polystrata__generate_image":
+                if r.get("ok") and r.get("image_file"):
+                    yield "event", Event("content", "图片已生成。")
+                elif not r.get("ok"):
+                    yield "event", Event("content", "图像生成失败，请查看上方工具详情并重试。")
+                else:
+                    yield "event", Event("content", "图像任务已结束。")
+                break
         if cancel.is_set() or len(results) < len(calls):
             done = {**done, "finish": "cancel"}
+            break
+        if len(calls) == 1 and calls[0].name == "polystrata__generate_image":
             break
         messages.append({"role": "assistant", "content": "".join(text).strip(),
                          **({"reasoning_content": "".join(reasoning).strip()} if reasoning else {}),
@@ -6145,7 +6160,7 @@ def make_handler(svc: Service):
                     self._json(404, {"error": {"message": "V1 sessions disabled"}});return
                 try:
                     from serve.character_cards import CharacterStore
-                    file = CharacterStore(svc.session_v1.root).image_file(
+                    file = CharacterStore(svc.session_v1.root.parent / "character").image_file(
                         path[len("/v1/strata/characters/reference/"):])
                 except ValueError as exc:
                     self._json(400, {"error": {"message": str(exc)}});return
@@ -6168,7 +6183,7 @@ def make_handler(svc: Service):
                     self._json(403, {"error": {"message": "foreign origin"}})
                     return
                 from serve.character_cards import CharacterStore
-                self._json(200, CharacterStore(svc.session_v1.root).snapshot())
+                self._json(200, CharacterStore(svc.session_v1.root.parent / "character").snapshot())
                 return
             if path == "/v1/strata/sessions" or path.startswith("/v1/strata/sessions/"):
                 if not self._authorized():
@@ -6375,7 +6390,7 @@ def make_handler(svc: Service):
                     if not self._own_page("private characters and persona can be changed"):
                         return
                     from serve.character_cards import CharacterStore, card_from_tavern
-                    cards = CharacterStore(svc.session_v1.root)
+                    cards = CharacterStore(svc.session_v1.root.parent / "character")
                     action = req.get("action")
                     if action == "save":
                         self._json(200, {"card": cards.save(req.get("card"))})
