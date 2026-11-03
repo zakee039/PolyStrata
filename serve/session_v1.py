@@ -29,6 +29,7 @@ MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_ATTACHMENT_BYTES = 1024 * 1024
 MAX_MESSAGES = 5000
+GENERATED_IMAGE_FILE = re.compile(r"^[0-9a-f]{32}\.png$")
 
 
 def valid_id(value):
@@ -332,9 +333,46 @@ class SessionV1:
                 raise KeyError("session not found")
             c.execute("UPDATE conversations SET pinned=? WHERE id=?", (int(pinned), ident))
 
+    @staticmethod
+    def _chat_generated_files(messages):
+        """Only Chat image-tool outputs are owned by a conversation.
+
+        The shared generated-images folder also contains standalone Images-tab
+        outputs, which must not be removed by deleting an unrelated chat.
+        Check saved swipe variants so discarded/older generations are included.
+        """
+        owned = set()
+        if not isinstance(messages, list):
+            return owned
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            variants = [message]
+            if isinstance(message.get("swipes"), list):
+                variants.extend(v for v in message["swipes"] if isinstance(v, dict))
+            for variant in variants:
+                for tool in variant.get("tools", []) if isinstance(variant.get("tools"), list) else []:
+                    if not isinstance(tool, dict) or tool.get("name") != "polystrata__generate_image":
+                        continue
+                    for key in ("image_file", "image_original_file"):
+                        name = tool.get(key)
+                        if isinstance(name, str) and GENERATED_IMAGE_FILE.fullmatch(name):
+                            owned.add(name)
+        return owned
+
     def delete(self, ident):
         valid_id(ident)
         with self.lock, self._db() as c:
+            row = c.execute("SELECT web_messages FROM conversations WHERE id=?", (ident,)).fetchone()
+            generated = self._chat_generated_files(json.loads(row["web_messages"])) if row else set()
+            # Any remaining chat may link to the same PNG. Count references in
+            # both message stores, including direct URL links, before deleting.
+            if generated:
+                other_rows = c.execute("SELECT web_messages,api_messages FROM conversations "
+                                       "WHERE id!=?", (ident,)).fetchall()
+                generated = {name for name in generated
+                             if not any(name in other["web_messages"] or name in other["api_messages"]
+                                        for other in other_rows)}
             snapshots = self._kv_rows(c, ident)
             c.execute("DELETE FROM kv_snapshots WHERE session_id=?", (ident,))
             c.execute("DELETE FROM conversations WHERE id=?", (ident,))
@@ -344,6 +382,9 @@ class SessionV1:
             for row in snapshots:
                 self._model_path(ident, row["model_key"]).unlink(missing_ok=True)
             (self.kv_dir / (ident + ".bin")).unlink(missing_ok=True)
+            for name in generated:
+                # Validated opaque basenames only; never traverse other paths.
+                (self.generated_dir / name).unlink(missing_ok=True)
         # Only files belonging to this deleted session are removed.
         for folder in (self.images_dir, self.attachments_dir):
             shutil.rmtree(folder / ident, ignore_errors=True)

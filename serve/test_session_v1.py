@@ -113,6 +113,51 @@ class TestSessionV1(unittest.TestCase):
             self.store.store_web(ident, [{"role": "user", "images": [
                 {"name": "fake.png", "url": "data:image/png;base64,YWJj"}]}])
 
+    def test_deleting_chat_removes_its_generated_pictures_but_not_images_tab(self):
+        generated = self.store.generated_dir
+        image = "a" * 32 + ".png"
+        original = "b" * 32 + ".png"
+        old_swipe = "c" * 32 + ".png"
+        gallery = "d" * 32 + ".png"
+        for name in (image, original, old_swipe, gallery):
+            (generated / name).write_bytes(b"test PNG")
+        self.store.store_web("chat_own", [
+            {"role": "user", "text": "Draw an illustration"},
+            {"role": "assistant", "text": "Done", "tools": [
+                {"name": "polystrata__generate_image", "image_file": image,
+                 "image_original_file": original}],
+             "swipes": [{"tools": [
+                 {"name": "polystrata__generate_image", "image_file": old_swipe}]}]}])
+        self.store.delete("chat_own")
+        for name in (image, original, old_swipe):
+            self.assertFalse((generated / name).exists(), name)
+        self.assertTrue((generated / gallery).exists())
+
+    def test_deleting_chat_preserves_generated_images_shared_with_other_chat(self):
+        name = "e" * 32 + ".png"
+        png = self.store.generated_dir / name
+        png.write_bytes(b"shared PNG")
+        self.store.store_web("owner", [
+            {"role": "assistant", "text": "Generated", "tools": [
+                {"name": "polystrata__generate_image", "image_file": name}]}])
+        self.store.store_web("other", [
+            {"role": "user", "text": "See v1/images/files/" + name}])
+        self.store.delete("owner")
+        self.assertTrue(png.exists())
+        self.assertIsNotNone(self.store.get("other"))
+
+    def test_session_delete_does_not_trust_user_image_fields_or_paths(self):
+        gallery = "f" * 32 + ".png"
+        png = self.store.generated_dir / gallery
+        png.write_bytes(b"gallery PNG")
+        self.store.store_web("untrusted", [
+            {"role": "user", "image_file": gallery},
+            {"role": "assistant", "tools": [
+                {"name": "unrelated_tool", "image_file": gallery},
+                {"name": "polystrata__generate_image", "image_file": "../" + gallery}]}])
+        self.store.delete("untrusted")
+        self.assertTrue(png.exists())
+
     def test_invalid_identifiers(self):
         for ident in ("../escape", "/tmp/p", "a.b", "", "a" * 65):
             with self.assertRaises(ValueError):
