@@ -3215,6 +3215,15 @@ def budget_tokens(value) -> int | None:
     return value if value > 0 else None
 
 
+def answer_budget_tokens(value) -> int | None:
+    """Optional answer-only cap, excluding reasoning and tool-call tokens."""
+    if value is None:
+        return None
+    if type(value) is not int or not 1 <= value <= 262144:
+        raise ValueError("answer_budget_tokens must be an integer from 1 to 262144")
+    return value
+
+
 class Service:
     def __init__(self, engine: Engine, tokenizer, template: ChatTemplate, model_name: str = "qwen3.8-flash-next",
                  vision: Vision | None = None, sampling_defaults: dict | None = None,
@@ -4845,6 +4854,7 @@ class Service:
             sampling = {**defaults, **req_values}
         # #123: read after the merge, so a budget shared through POST /settings is seen like the other keys
         budget = self.reasoning_budget(sampling) if thinking else None
+        answer_cap = answer_budget_tokens((sampling or {}).get("answer_budget_tokens"))
         # Issue 16: a reply as long as the context has left (no max_tokens, or fit_max_tokens) was cut by the context,
         # not by a small cap the client chose, so it gets the answer room however short it is.  Flint in an agent
         # had 416 tokens left in a full 32K context, thought through all of them and gave no answer.
@@ -4875,6 +4885,7 @@ class Service:
         detok, n, finish = Detokenizer(self.tok), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
+        answer_n, answer_started = 0, False             # cap only the visible answer, not reasoning
         stop_list = stop_strings(sampling)
         stops = StopMatcher(stop_list) if stop_list else None
 
@@ -5041,6 +5052,8 @@ class Service:
                                 piece = detok.push(t)
                                 tail = (tail + piece)[-2:]
                                 evs = cut(parser.feed(piece))
+                                if any(ev.kind == "content" and ev.text for ev in evs):
+                                    answer_started = True
                                 self._note(n, evs, st, rate)
                                 last_print = self._progress(last_print, st=st)
                                 for ev in evs:
@@ -5057,6 +5070,12 @@ class Service:
                                 if stops is not None and stops.hit is not None:
                                     finish = "stop"         # gen.close() below STOPs the engine, as for a stop token
                                     break
+                                if answer_cap is not None and answer_started and parser.state == "content":
+                                    answer_n += 1
+                                    # A token held by the parser/detokenizer is not a safe break point.
+                                    if answer_n >= answer_cap and not parser.buf and not detok.pending():
+                                        finish = "length"
+                                        break
                                 if (self.reasoning_loop_recovery and not recovery_count and parser.state == "reasoning"
                                         and n >= next_loop_check and not parser.buf and not parser.pending
                                         and not detok.pending()):
@@ -6975,6 +6994,7 @@ def make_handler(svc: Service):
             if force and use_mcp:
                 raise ValueError("a forced tool_choice with MCP tools is not supported")
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
+            answer_budget_tokens(req.get("answer_budget_tokens"))
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
             cancel = self.cancel                             # watched since _post() (#430 #431 #1999)
@@ -7233,6 +7253,7 @@ def make_handler(svc: Service):
             force = forced_call(req.get("tool_choice"), tools)        # "any" / {"type": "tool", "name": N}
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
+            answer_budget_tokens(req.get("answer_budget_tokens"))
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
             cancel = self.cancel                             # watched since _post() (#430 #431 #1999)
