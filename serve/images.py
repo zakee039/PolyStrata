@@ -46,6 +46,8 @@ POLICIES = ("auto", "keep", "shrink", "unload")
 SIZE_STEP = 32                     # sd.cpp's Qwen-Image-2.1 docs: dimensions divisible by 32
 MIN_SIDE = 256
 FILE_NAME = re.compile(r"^[0-9a-f]{32}\.png$")
+LORA_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+LORA_STEM = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 STEP_LINE = re.compile(r"\|\s*(\d+)/(\d+)\s*-")      # sd.cpp's progress bar: "|====    | 3/8 - 14.1s/it"
 
 
@@ -81,6 +83,41 @@ def _int_field(req: dict, key: str, lo: int, hi: int, default):
     if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
         raise ImageRequestError(f"{key}: a whole number from {lo} to {hi}")
     return v
+
+
+def available_loras(cfg: dict) -> list[dict]:
+    """Safe, server-owned LoRA catalog; never accept a path from the browser."""
+    result = []
+    entries = cfg.get("loras") or {}
+    if not isinstance(entries, dict):
+        return result
+    for ident, entry in entries.items():
+        if not isinstance(ident, str) or not LORA_ID.fullmatch(ident) or not isinstance(entry, dict):
+            continue
+        file = Path(str(entry.get("path") or ""))
+        usable = file.is_file() and file.suffix.lower() == ".safetensors" and bool(LORA_STEM.fullmatch(file.stem))
+        result.append({"id": ident, "name": str(entry.get("name") or ident),
+                       "available": bool(usable), "family": "qwen_turbo"})
+    return result
+
+
+def resolve_lora(req: dict, cfg: dict) -> dict | None:
+    ident = req.get("strata_lora_id")
+    if ident in (None, "", "none"):
+        return None
+    if not isinstance(ident, str) or not LORA_ID.fullmatch(ident):
+        raise ImageRequestError("strata_lora_id: invalid LoRA id")
+    if (cfg.get("family") or "qwen_turbo") != "qwen_turbo":
+        raise ImageRequestError("LoRA is available only for Qwen-Image 2.1 models")
+    entry = (cfg.get("loras") or {}).get(ident)
+    if not isinstance(entry, dict):
+        raise ImageRequestError("strata_lora_id: LoRA not registered")
+    path = Path(str(entry.get("path") or ""))
+    if not path.is_file() or path.suffix.lower() != ".safetensors" or not LORA_STEM.fullmatch(path.stem):
+        raise ImageRequestError("selected LoRA file is unavailable or invalid")
+    if not path.resolve().is_relative_to(Path(cfg.get("lora_dir") or "").resolve()):
+        raise ImageRequestError("LoRA file is outside the configured model directory")
+    return {"id": ident, "path": path, "name": str(entry.get("name") or ident), "strength": 1.0}
 
 
 def parse_request(req: dict, cfg: dict) -> dict:
@@ -143,10 +180,11 @@ def parse_request(req: dict, cfg: dict) -> dict:
             raise ImageRequestError("reference: unsupported or corrupted image") from exc
     from serve.upscale import options
     upscale, style_hint = options(req)
+    lora = resolve_lora(req, cfg)
     return {"prompt": prompt, "negative_prompt": negative, "reference_png": reference_png,
             "denoise_strength": float(strength) if reference_png is not None else None,
             "width": w, "height": h, "n": n, "steps": steps, "seed": seed,
-            "response_format": fmt, "upscale": upscale, "style_hint": style_hint}
+            "response_format": fmt, "upscale": upscale, "style_hint": style_hint, "lora": lora}
 
 
 def postprocess(gen, images: list[bytes], job: dict, cancel: threading.Event | None = None):
@@ -172,7 +210,12 @@ def sd_cli_args(cfg: dict, job: dict, out_pattern: str) -> list[str]:
                 "--vae", str(cfg["vae"]), "--llm", str(cfg["llm"])]
         if cfg.get("llm_vision"):
             cmd += ["--llm_vision", str(cfg["llm_vision"])]
-    cmd += ["-p", job["prompt"], "--steps", str(job["steps"]),
+    lora = job.get("lora")
+    prompt = job["prompt"]
+    if lora:
+        prompt += f" <lora:{lora['path'].stem}:{lora['strength']:g}>"
+        cmd += ["--lora-model-dir", str(lora["path"].parent), "--lora-apply-mode", "at_runtime"]
+    cmd += ["-p", prompt, "--steps", str(job["steps"]),
             "--cfg-scale", str(cfg.get("cfg_scale", 7.0 if family == "sdxl" else 1.0)),
             "--sampling-method", str(cfg.get("sampler", "euler")),
             "-W", str(job["width"]), "-H", str(job["height"])]

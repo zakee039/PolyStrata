@@ -66,6 +66,39 @@ class Request(unittest.TestCase):
             with self.subTest(req=req), self.assertRaises(images_api.ImageRequestError):
                 images_api.parse_request(req, self.CFG)
 
+    def test_lora_catalog_and_selection_are_safe_and_optional(self):
+        with tempfile.TemporaryDirectory() as d:
+            lora = Path(d) / "Genitalia-Anatomy-2.1-v1.safetensors"
+            lora.write_bytes(b"test safetensors fixture")
+            cfg = {"family": "qwen_turbo", "lora_dir": d, "loras": {
+                "anatomy-fix": {"name": "Anatomy Fix", "path": str(lora)}}}
+            self.assertIsNone(images_api.parse_request({"prompt": "test"}, cfg)["lora"])
+            entries = images_api.available_loras(cfg)
+            self.assertEqual([(i["id"], i["available"]) for i in entries], [("anatomy-fix", True)])
+            job = images_api.parse_request({"prompt": "test", "strata_lora_id": "anatomy-fix"}, cfg)
+            self.assertEqual(job["lora"]["path"], lora)
+            self.assertEqual(job["lora"]["strength"], 1.0)
+            args = images_api.sd_cli_args(
+                {"exe": "sd-cli", "diffusion_model": "m.gguf", "vae": "v.st",
+                 "llm": "t.gguf", **cfg}, job, "result.png")
+            self.assertEqual(args[args.index("--lora-model-dir") + 1], d)
+            self.assertEqual(args[args.index("--lora-apply-mode") + 1], "at_runtime")
+            self.assertIn("<lora:Genitalia-Anatomy-2.1-v1:1>", args[args.index("-p") + 1])
+            for bad in ("../bad", "not-registered", 123):
+                with self.subTest(bad=bad), self.assertRaises(images_api.ImageRequestError):
+                    images_api.parse_request({"prompt": "x", "strata_lora_id": bad}, cfg)
+            with self.assertRaises(images_api.ImageRequestError):
+                images_api.parse_request({"prompt": "x", "strata_lora_id": "anatomy-fix"},
+                                         {**cfg, "family": "sdxl"})
+            other = Path(d).parent / "outside-model.safetensors"
+            cfg["loras"]["anatomy-fix"]["path"] = str(other)
+            other.write_bytes(b"test fixture")
+            try:
+                with self.assertRaises(images_api.ImageRequestError):
+                    images_api.parse_request({"prompt": "x", "strata_lora_id": "anatomy-fix"}, cfg)
+            finally:
+                other.unlink(missing_ok=True)
+
 
 class Command(unittest.TestCase):
     def test_the_model_cards_command(self):

@@ -6117,7 +6117,8 @@ def make_handler(svc: Service):
                                                "qwen_edit" if gen.cfg.get("llm_vision") else "none")}
                 available = [image_model_info(svc.images.cfg.get("profile_id") or "default", svc.images)]
                 available += [image_model_info(ident, gen) for ident, gen in svc.image_profiles.items()]
-                self._json(200, {"models": available})
+                self._json(200, {"models": available,
+                                 "loras": images_api.available_loras(svc.images.cfg)})
                 return
             if path == "/metrics/prometheus":
                 if self._authorized():
@@ -6665,6 +6666,8 @@ def make_handler(svc: Service):
                 return
             figures["gpu_policy"] = policy
             figures["image_profile"] = profile_id
+            if job.get("lora"):
+                figures["lora_id"] = job["lora"]["id"]
             if svc.session_v1 and job["response_format"] != "url":
                 for png in images:
                     gen.store(png)  # base64 responses also get durable PNG files
