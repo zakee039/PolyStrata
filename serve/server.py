@@ -6471,6 +6471,8 @@ def make_handler(svc: Service):
                             svc.session_v1.rename(ident, req.get("title"))
                         elif action == "pin":
                             svc.session_v1.pin(ident, req.get("pinned"))
+                        elif action == "sampling":
+                            svc.session_v1.set_sampling(ident, req.get("sampling"))
                         elif action == "lock_kv":
                             model = svc._v1_model_key()
                             # Do not SAVE from this HTTP handler: the engine FIFO owns

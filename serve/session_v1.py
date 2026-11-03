@@ -92,8 +92,13 @@ class SessionV1:
                 api_messages TEXT NOT NULL DEFAULT '[]',
                 web_messages TEXT NOT NULL DEFAULT '[]',
                 pinned INTEGER NOT NULL DEFAULT 0,
-                content_rev INTEGER NOT NULL DEFAULT 0
+                content_rev INTEGER NOT NULL DEFAULT 0,
+                sampling_json TEXT NOT NULL DEFAULT '{}'
             )""")
+            # Preserve existing conversations while introducing session-local sampling.
+            columns = {row["name"] for row in c.execute("PRAGMA table_info(conversations)")}
+            if "sampling_json" not in columns:
+                c.execute("ALTER TABLE conversations ADD COLUMN sampling_json TEXT NOT NULL DEFAULT '{}'")
             c.execute("CREATE INDEX IF NOT EXISTS ix_conv_updated ON conversations(updated DESC)")
             c.execute("""CREATE TABLE IF NOT EXISTS kv_snapshots (
                 session_id TEXT NOT NULL,
@@ -285,9 +290,50 @@ class SessionV1:
             metadata = self._summary(c, row, model)
         record = dict(row)
         record.update(metadata)
+        record["sampling"] = json.loads(record.pop("sampling_json"))
         record["api_messages"] = self._unpack(ident, json.loads(record["api_messages"]))
         record["web_messages"] = self._unpack(ident, json.loads(record["web_messages"]))
         return record
+
+    def set_sampling(self, ident, sampling):
+        """Persist decoding parameters for one conversation, never a browser.
+
+        Sampling does not change the prompt; preserve any saved KV snapshot's
+        content revision when it is edited.
+        """
+        valid_id(ident)
+        if not isinstance(sampling, dict):
+            raise ValueError("sampling must be an object")
+        keys = {"thinking", "budget", "temperature", "top_p", "top_k",
+                "max", "seed", "show", "esp", "mcp"}
+        if set(sampling) != keys:
+            raise ValueError("sampling keys are incomplete or unknown")
+        if sampling["thinking"] not in ("none", "low", "medium", "high"):
+            raise ValueError("invalid thinking level")
+        def integer(name, lo, hi, empty=False):
+            val = sampling[name]
+            if empty and val == "":
+                return
+            if type(val) is not int or not lo <= val <= hi:
+                raise ValueError(f"invalid {name}")
+        integer("budget", 0, 262144)
+        if sampling["thinking"] == "none" and sampling["budget"] != 0:
+            raise ValueError("thinking=none requires zero budget")
+        for name, lo, hi in (("temperature", 0, 1.5), ("top_p", 0.05, 1)):
+            val = sampling[name]
+            if type(val) not in (int, float) or not lo <= val <= hi:
+                raise ValueError(f"invalid {name}")
+        integer("top_k", 1, 64)
+        integer("max", 1, 262144, True)
+        integer("seed", 1, 2147483647, True)
+        for name in ("show", "esp", "mcp"):
+            if type(sampling[name]) is not bool:
+                raise ValueError(f"invalid {name}")
+        with self.lock, self._db() as c:
+            self._ensure(c, ident)
+            c.execute("UPDATE conversations SET sampling_json=? WHERE id=?",
+                      (json.dumps(sampling, ensure_ascii=False), ident))
+        return sampling
 
     def list(self, model=None):
         with self.lock, self._db() as c:
